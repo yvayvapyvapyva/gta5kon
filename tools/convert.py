@@ -794,6 +794,38 @@ def build_glb(dff, images, out_path):
                             'frames': frames, 'hinge': hinge,
                             'tris': sum(len(gr['idx']) // 3 for gr in groups.values())}
 
+    # --- номера: quads с plaka/plakalk из бамперов — в свои ноды ---
+    # (в DFF отдельного фрейма номера нет; игра в SA рисует его поверх).
+    # Группы с этими текстурами уже лежат отдельно внутри бамперов —
+    # переносим их в свой стор и перебазируем на собственный центр.
+    for pname, platename in (('bumper_front', 'plate_front'),
+                             ('bumper_rear', 'plate_rear')):
+        if pname not in part_data:
+            continue
+        d = part_data[pname]
+        pg, po = new_store()
+        for k in list(d['order']):
+            if k[0] in ('plaka', 'plakalk'):
+                pg[k] = d['groups'].pop(k)
+                d['order'].remove(k)
+                po.append(k)
+        if not po:
+            print(f"[glb] {platename}: quads номера не найдены")
+            continue
+        allp = np.vstack([np.array(pg[k]['pos'], dtype=np.float64) for k in po])
+        c = (allp.min(axis=0) + allp.max(axis=0)) / 2.0  # центр (Three, отн. пивота бампера)
+        for k in po:
+            pg[k]['pos'] = (np.array(pg[k]['pos'], dtype=np.float64) - c).tolist()
+        bp = np.asarray(d['pivot_gta'], dtype=np.float64)
+        P = bp + np.array([c[0], -c[2], c[1]])  # three->gta смещения
+        ntris = sum(len(pg[k]['idx']) // 3 for k in po)
+        part_data[platename] = {'groups': pg, 'order': po,
+                                'pivot_gta': [float(v) for v in P],
+                                'frames': d['frames'], 'hinge': None,
+                                'tris': ntris}
+        d['tris'] = sum(len(gr['idx']) // 3 for gr in d['groups'].values())
+        print(f"[glb] {platename}: {ntris} tris, пивот GTA {P.round(3).tolist()}")
+
     # --- статика: всё остальное (кузов, салон, подкапотка) одним мешем ---
     static_jobs = 0
     for at in atomics:
@@ -868,9 +900,8 @@ def build_glb(dff, images, out_path):
     # общий порядок материалов: статика, детали, руль, колёса
     order = []
     stores_in_order = [(static_order, static_groups)]
-    for pname, _f, _p, _h in PARTS:
-        if pname in part_data:
-            stores_in_order.append((part_data[pname]['order'], part_data[pname]['groups']))
+    for pname, d in part_data.items():
+        stores_in_order.append((d['order'], d['groups']))
     stores_in_order += [(steer_order, steer_groups),
                         (wheelR_order, wheelR_groups),
                         (wheelL_order, wheelL_groups)]
@@ -996,10 +1027,8 @@ def build_glb(dff, images, out_path):
     meshes = []
     mesh_idx = {}  # 'static' | part | 'steer' | 'wheelR' | 'wheelL' -> idx
     mesh_jobs = [('static', static_order, static_groups, 'chassis')]
-    for pname, _f, _p, _h in PARTS:
-        if pname in part_data:
-            d = part_data[pname]
-            mesh_jobs.append((pname, d['order'], d['groups'], pname))
+    for pname, d in part_data.items():
+        mesh_jobs.append((pname, d['order'], d['groups'], pname))
     mesh_jobs += [
         ('steer', steer_order, steer_groups, 'steering_wheel'),
         ('wheelR', wheelR_order, wheelR_groups, 'wheel_R'),
@@ -1032,10 +1061,9 @@ def build_glb(dff, images, out_path):
     scene_roots.append(n_chassis)
 
     part_nodes = {}  # pname -> node idx (для будущих анимаций из вьювера)
-    for pname, _f, _p, _h in PARTS:
-        if pname not in part_data or pname not in mesh_idx:
+    for pname, d in part_data.items():
+        if pname not in mesh_idx:
             continue
-        d = part_data[pname]
         extra = {'part': pname, 'frames': d['frames'],
                  'pivot_gta': d['pivot_gta']}
         if d['hinge'] is not None:

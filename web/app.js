@@ -328,6 +328,7 @@ const PART_GROUPS = [
     'glass_headlight', 'repeater', 'repeater_glass', 'grille', 'front_trim']],
   ['Оптика зад', ['optika_rear', 'bulbs_rear', 'lens_red', 'lens_clear',
     'lens_rear', 'reflector_rear']],
+  ['Номера', ['plate_front', 'plate_rear']],
 ];
 const PART_LABELS = {
   door_rf: 'Дверь передняя правая', door_lf: 'Дверь передняя левая',
@@ -342,6 +343,7 @@ const PART_LABELS = {
   optika_rear: 'Корпус фонаря', bulbs_rear: 'Лампы задние',
   lens_red: 'Рассеиватель красный', lens_clear: 'Рассеиватель прозрачный',
   lens_rear: 'Стекло фонаря', reflector_rear: 'Катафот задний',
+  plate_front: 'Номер передний', plate_rear: 'Номер задний',
 };
 function buildPartsList() {
   const box = document.getElementById('partsList');

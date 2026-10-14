@@ -21,11 +21,12 @@ python3 -m http.server 8000 --directory web
 - `tools/convert.py` — парсер RenderWare DFF (фреймы **с именами** — распознан
   фрейм `руль`, `wheel_sr6`, `wheel_*_dummy`, 59 шт.; геометрии, материалы/MatFX,
   specular 0x253F2F6, reflection 0x253F2FC) + TXD (DXT1-декодер на numpy) →
-  иерархический `model.glb` (28 МБ, 41 нода, 28 мешей):
-  `chassis` — статика (кузов, салон, подкапотка); 24 детали отдельными
+  иерархический `model.glb` (27 МБ, 43 ноды, 30 мешей):
+  `chassis` — статика (кузов, салон, подкапотка); 26 деталей отдельными
   нодами с пивотами дамми как в SA (`door_*`, `bonnet`, `boot`,
   `bumper_front/rear`, `windscreen`, `glass_rear`, вся оптика спереди
-  и сзади, решётка; у дверей/капота/багажника ось петли — в
+  и сзади, решётка, `plate_front/rear` — номера, выцепленные из бамперов
+  по материалам `plaka/plakalk`; у дверей/капота/багажника ось петли — в
   `extras.hinge_axis`); `steering` — руль с пивотом в центре;
   `wheel_{rf,lf,rb,lb}_steer` → `wheel_*_spin` — колёса, левая сторона
   отзеркалена; 7 пустых маркеров (`exhaust`, `ped_frontseat/backseat`,
