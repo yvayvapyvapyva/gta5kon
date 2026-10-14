@@ -655,36 +655,82 @@ def build_glb(dff, images, out_path):
     # --- как устроено в GTA SA ---
     # Кузов/салон/двери/бамперы: статика, запекаем мировые трансляции.
     # Колёса: wheel_*_dummy — нода поворота (yaw вокруг Z GTA / Y Three,
-    # только передние), wheel mesh (здесь wheel_sr6, клон на 4 угла игрой) —
-    # нода вращения (вокруг оси X GTA / X Three). Левый борт — зеркально.
-    # Руль в салоне (здесь фрейм "руль"): крутится вокруг колонки
-    # (ось Y GTA / Z Three) пропорционально повороту передних колёс.
+    # только передние), wheel mesh — нода вращения (вокруг оси X GTA /
+    # X Three; в игре клонируется с RF на 4 угла). Левый борт — зеркально.
+    # Руль в салоне: крутится вокруг колонки пропорционально повороту.
+    #
+    # Резолв деталей — ПО ИМЕНАМ (стандарт SA), без индексов фреймов:
+    #  (a) пары X_ok + X_dummy (двери/капот/багажник/бамперы/стекло) —
+    #      находятся в любой SA-модели; пивот = дамми, как в игре;
+    #  (b) таблица кандидатов для остального (оптика, решётка, руль);
+    #  (c) эвристики: колесо = геометрия-ребёнок wheel-дамми, иначе по форме.
+    # Всё ненайденное тихо остаётся в статике. Индексов фреймов в коде нет.
     names = dff.get('frame_names', []) or []
     atomics_by_frame = {}
     for at in atomics:
         atomics_by_frame.setdefault(at['frame'], at)
 
-    def find_frame(*cands, fallback=None):
+    _low = {}
+    for _i, _n in enumerate(names):
+        if _n and _n.lower() not in _low:
+            _low[_n.lower()] = _i
+
+    def find_exact(*cands):
+        """Первый фрейм с именем из кандидатов (точное, потом без регистра)."""
         for c in cands:
             for i, n in enumerate(names):
-                if n == c or n.lower() == c.lower():
+                if n == c:
                     return i
-        return fallback
+        for c in cands:
+            if c.lower() in _low:
+                return _low[c.lower()]
+        return None
+
+    def find_all(*cands):
+        """Все фреймы с именами из кандидатов."""
+        out = []
+        for c in cands:
+            for i, n in enumerate(names):
+                if n == c or (n and n.lower() == c.lower()):
+                    if i not in out:
+                        out.append(i)
+        return out
+
+    def has_geom(fi):
+        return (fi is not None and fi in atomics_by_frame
+                and geoms[atomics_by_frame[fi]['geom']]['verts'] is not None)
 
     nframes = len(dff['frames'])
     FI = lambda i: i if (i is not None and 0 <= i < nframes) else None
-    wheel_mesh_fi = FI(find_frame('wheel_sr6', fallback=55))
-    steer_fis = {
-        'rf': FI(find_frame('wheel_rf_dummy', fallback=54)),
-        'lf': FI(find_frame('wheel_lf_dummy', fallback=56)),
-        'rb': FI(find_frame('wheel_rb_dummy', fallback=57)),
-        'lb': FI(find_frame('wheel_lb_dummy', fallback=58)),
-    }
-    # "руль" в cp1251 уже декодирован в parse_dff
-    steer_wheel_fi = FI(find_frame('руль', 'rul', 'steering', 'steering_wheel',
-                                   fallback=8))
+
+    # --- колёса: стандартные дамми SA ---
+    steer_fis = {}
+    for side in ('rf', 'lf', 'rb', 'lb'):
+        steer_fis[side] = FI(find_exact(f'wheel_{side}_dummy'))
+    # --- колесо-меш: (c1) ребёнок wheel-дамми, (c2) имя, (c3) форма ---
+    wheel_mesh_fi = None
+    for fi in atomics_by_frame:
+        p = dff['frames'][fi]['parent']
+        if (p is not None and 0 <= p < len(names)
+                and (names[p] or '').lower().startswith('wheel_')
+                and (names[p] or '').lower().endswith('_dummy')):
+            wheel_mesh_fi = fi
+            break
+    if wheel_mesh_fi is None:
+        wheel_mesh_fi = FI(find_exact('wheel_sr6', 'wheel_ok', 'wheel'))
+    # --- руль: кандидаты + подстрока steer/рул (у VehFuncs-моделей f_steer) ---
+    steer_wheel_fi = FI(find_exact('руль', 'rul', 'steering', 'steering_wheel',
+                                   'f_steer', 'volant'))
+    if steer_wheel_fi is None or not has_geom(steer_wheel_fi):
+        steer_wheel_fi = None
+        for i, n in enumerate(names):
+            nl = (n or '').lower()
+            if ('steer' in nl or 'рул' in nl) and has_geom(i):
+                steer_wheel_fi = i
+                break
     print(f"[glb] фреймы: wheel_mesh={wheel_mesh_fi} ({names[wheel_mesh_fi] if wheel_mesh_fi is not None and wheel_mesh_fi < len(names) else '?'}) "
-          f"dummies={steer_fis} руль={steer_wheel_fi}")
+          f"dummies={steer_fis} руль={steer_wheel_fi} "
+          f"({names[steer_wheel_fi] if steer_wheel_fi is not None else '?'})")
 
     def gta_to_three_p(p):
         p = np.asarray(p, dtype=np.float64)
@@ -700,9 +746,9 @@ def build_glb(dff, images, out_path):
     g_wheel = None
     if wheel_mesh_fi in atomics_by_frame:
         g_wheel = geoms[atomics_by_frame[wheel_mesh_fi]['geom']]
-    elif wheel_mesh_fi is not None:
-        # фрейм есть, но без атомика — ищем геометрию колеса по форме:
-        # узкая по X (ступица), круглая в Y-Z
+    if g_wheel is None and any(v is not None for v in steer_fis.values()):
+        # запасной путь: геометрия колеса по форме —
+        # узкая по X (ступица), круглая в Y-Z (диаметр)
         best, best_score = None, 1e9
         for g in geoms:
             if g['verts'] is None:
@@ -714,6 +760,8 @@ def build_glb(dff, images, out_path):
                 if score < best_score:
                     best, best_score = g, score
         g_wheel = best
+        if best is not None:
+            print("[glb] колесо найдено по форме геометрии (имя/родитель не подошли)")
 
     g_steer = None
     if steer_wheel_fi in atomics_by_frame:
@@ -725,35 +773,70 @@ def build_glb(dff, images, out_path):
     # (для оптики/стёкол, где пивот не важен, а важно вкл/выкл).
     # hinge_axis — ось петли в координатах GTA для будущих анимаций
     # (двери — вертикаль, капот/багажник — поперечная).
-    PARTS = [
-        ('door_rf',        [37], ('dummy', 36), (0, 0, 1)),
-        ('door_lf',        [35], ('dummy', 34), (0, 0, 1)),
-        ('door_rr',        [31], ('dummy', 30), (0, 0, 1)),
-        ('door_lr',        [33], ('dummy', 32), (0, 0, 1)),
-        ('bonnet',         [47], ('dummy', 46), (1, 0, 0)),
-        ('boot',           [45], ('dummy', 44), (1, 0, 0)),
-        ('bumper_front',   [53], ('dummy', 38), None),
-        ('bumper_rear',    [40], ('dummy', 39), None),
-        ('windscreen',     [43], ('dummy', 42), None),
-        ('optika_front',   [26], ('bbox',), None),
-        ('bulbs_front',    [27], ('bbox',), None),
-        ('headlight',      [28], ('bbox',), None),
-        ('glass_headlight', [29], ('bbox',), None),
-        ('repeater',       [18], ('bbox',), None),
-        ('repeater_glass', [19], ('bbox',), None),
-        ('grille',         [25], ('bbox',), None),
-        ('front_trim',     [21, 22, 23], ('bbox',), None),
-        ('optika_rear',    [13], ('bbox',), None),
-        ('bulbs_rear',     [14], ('bbox',), None),
-        ('lens_red',       [15], ('bbox',), None),
-        ('lens_clear',     [16], ('bbox',), None),
-        ('lens_rear',      [17], ('bbox',), None),
-        ('reflector_rear', [41], ('bbox',), None),
-        ('glass_rear',     [24], ('bbox',), None),
-    ]
+    # --- детали: резолв по именам ---
+    # (a) Пары X_ok + X_dummy — стандартный паттерн SA для навесного
+    # (двери/капот/багажник/бамперы/стёкла): пивот = дамми, как в игре.
+    # Находится в любой SA-модели с ванильными именами; здесь же покрывает
+    # и кривой случай bump_front_ok (родитель — корень, а не дамми).
+    # (b) Таблица кандидатов для прочего (оптика, решётка, повторители).
+    # Промах = деталь тихо остаётся в статике. Индексов фреймов нет.
+    PARTS = []
+    for _role, _hinge in (('door_rf', (0, 0, 1)), ('door_lf', (0, 0, 1)),
+                          ('door_rr', (0, 0, 1)), ('door_lr', (0, 0, 1)),
+                          ('bonnet', (1, 0, 0)), ('boot', (1, 0, 0)),
+                          ('bumper_front', None), ('bumper_rear', None),
+                          ('windscreen', None)):
+        _variants = [_role, _role.replace('bumper_', 'bump_')]
+        _fi = _di = None
+        for _v in _variants:
+            _fi = _fi or find_exact(_v + '_ok')
+            _di = _di or find_exact(_v + '_dummy')
+        if _fi is None or not has_geom(_fi):
+            continue
+        _pname = _role  # bumper_* — стабильные имена нод в GLB/вьювере
+        if _di is None:
+            PARTS.append((_pname, [_fi], ('bbox',), _hinge))
+            print(f"[glb] деталь {_pname}: дамми нет — пивот по bbox")
+        else:
+            PARTS.append((_pname, [_fi], ('dummy', _di), _hinge))
+    for _pname, _cands in (
+        ('optika_front',    ['optika_front', 'headlight_housing']),
+        ('bulbs_front',     ['лампочки', 'bulbs_front', 'bulbs front']),
+        ('headlight',       ['фара перед', 'fara pered', 'headlight']),
+        ('glass_headlight', ['steklo', 'headlight_glass', 'glass_headlight']),
+        ('repeater',        ['povorotnik', 'repeater', 'side_indicator']),
+        ('repeater_glass',  ['povorot_steklo', 'repeater_glass']),
+        ('grille',          ['reshetka', 'grille']),
+        ('front_trim',      ['metal02', 'metal02_trim']),
+        ('optika_rear',     ['optika_rear', 'taillight_housing']),
+        ('bulbs_rear',      ['лампочки зад', 'bulbs_rear', 'bulbs rear']),
+        ('lens_red',        ['glass_red01', 'lens_red']),
+        ('lens_clear',      ['glass10', 'lens_clear']),
+        ('lens_rear',       ['стекло фара зад', 'lens_rear']),
+        ('reflector_rear',  ['glass_red02', 'reflector_rear']),
+        ('glass_rear',      ['steklo_zad', 'glass_rear', 'rear_window']),
+    ):
+        _fis = []
+        for _c in _cands:
+            _fi = find_exact(_c)
+            if _fi is not None and has_geom(_fi) and _fi not in _fis:
+                _fis.append(_fi)
+        if _pname == 'front_trim':
+            for _extra in ('metal_01', 'Plane010', 'metal01', 'plane'):
+                _fi = find_exact(_extra)
+                if _fi is not None and has_geom(_fi) and _fi not in _fis:
+                    _fis.append(_fi)
+        if not _fis:
+            continue
+        PARTS.append((_pname, _fis, ('bbox',), None))
     # маркеры без геометрии — точки привязки для будущего
     # (дым выхлопа, посадка персонажей, крышка бака, габариты света)
-    MARKERS = [1, 2, 48, 49, 50, 51, 52]
+    MARKERS = []
+    for _m in ('headlights', 'taillights', 'exhaust', 'engine',
+               'ped_frontseat', 'ped_backseat', 'petrolcap', 'numberplate'):
+        for _fi in find_all(_m):
+            if _fi not in atomics_by_frame and _fi not in MARKERS:
+                MARKERS.append(_fi)
 
     frame_to_part = {}
     for pname, frames, _piv, _h in PARTS:
