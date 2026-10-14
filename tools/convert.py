@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Конвертер GTA SA DFF+TXD (RenderWare) -> GLB для веб-просмотрщика.
 Использование:
-    python3 tools/convert.py --dff reno/sentinel.dff --txd reno/sentinel.txd --out web/model.glb
+    python3 tools/convert.py --dff path/to/car.dff --txd path/to/car.txd --out path/to/car.glb
 """
 import argparse
 import struct
@@ -111,7 +111,10 @@ def decode_dxt1(data: bytes, w: int, h: int):
 
 
 def parse_txd(path):
-    data = open(path, 'rb').read()
+    return parse_txd_data(open(path, 'rb').read())
+
+
+def parse_txd_data(data: bytes):
     # пропускаем root + struct count
     # root header 12
     t, s, v = struct.unpack_from('<III', data, 0)
@@ -331,7 +334,10 @@ def classify_material(m):
 
 
 def parse_dff(path):
-    data = open(path, 'rb').read()
+    return parse_dff_data(open(path, 'rb').read())
+
+
+def parse_dff_data(data: bytes):
     mv = memoryview(data)
     # root clump
     t, s, v = struct.unpack_from('<III', data, 0)
@@ -555,8 +561,18 @@ def parse_dff(path):
     }
 
 
+def parse_paint(s):
+    """'#3cff00' / '3cff00' -> (r, g, b)."""
+    s = (s or '').strip()
+    if s.startswith('#'):
+        s = s[1:]
+    if len(s) != 6 or any(c not in '0123456789abcdefABCDEF' for c in s):
+        raise ValueError(f'нужен HEX вида #rrggbb, получено {s!r}')
+    return int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16)
+
+
 # ---------- GLB ----------
-def build_glb(dff, images, out_path):
+def build_glb_bytes(dff, images, paint=None):
     geoms = dff['geoms']
     atomics = dff['atomics']
     W_R = dff['W_R']
@@ -980,14 +996,41 @@ def build_glb(dff, images, out_path):
           f"{sum(len(gr['idx']) // 3 for gr in wheelR_groups.values())}/"
           f"{sum(len(gr['idx']) // 3 for gr in wheelL_groups.values())}; "
           f"статика: {static_jobs} атомиков")
-    # общий порядок материалов: статика, детали, руль, колёса
-    order = []
     stores_in_order = [(static_order, static_groups)]
     for pname, d in part_data.items():
         stores_in_order.append((d['order'], d['groups']))
     stores_in_order += [(steer_order, steer_groups),
                         (wheelR_order, wheelR_groups),
                         (wheelL_order, wheelL_groups)]
+
+    # --- цвет кузова: перекрашиваем ТОЛЬКО главный кузовной материал ---
+    # Тот же критерий, что пикер вьювера: крупнейшая группа-kind 'paint'
+    # без текстуры. Красить все paint-группы нельзя: тёмная окантовка
+    # (4,4,4) тоже kind=='paint', и вся машина заливалась бы одним цветом.
+    if paint is not None:
+        try:
+            pr, pg_, pb = parse_paint(paint)
+        except ValueError as e:
+            raise ValueError(f'плохой цвет кузова: {e}')
+        best, best_tris = None, -1
+        for _o, _g in stores_in_order:
+            for k in _o:
+                gr = _g[k]
+                if classify_material(gr['mat']).get('kind') != 'paint':
+                    continue
+                t = len(gr['idx']) // 3
+                if t > best_tris:
+                    best, best_tris = gr, t
+        if best is None:
+            print("[glb] краска не найдена — цвет кузова пропущен")
+        else:
+            r0, g0, b0, a0 = best['mat'].get('color', (255, 255, 255, 255))
+            best['mat']['color'] = (pr, pg_, pb, a0)
+            print(f"[glb] краска кузова ({best_tris} tris, был "
+                  f"#{r0:02X}{g0:02X}{b0:02X}) -> #{pr:02X}{pg_:02X}{pb:02X}")
+
+    # общий порядок материалов: статика, детали, руль, колёса
+    order = []
     for _o, _g in stores_in_order:
         for k in _o:
             if k not in order:
@@ -1019,6 +1062,7 @@ def build_glb(dff, images, out_path):
     mat_index = {}
     gltf_materials = []
     use_clearcoat = False
+    used_mat_names = {}
     for key in order:
         gr = groups[key]
         m = gr['mat']
@@ -1028,7 +1072,13 @@ def build_glb(dff, images, out_path):
         base = [col[0] / 255.0, col[1] / 255.0, col[2] / 255.0, cls['opacity']]
         pbr = {'baseColorFactor': base, 'metallicFactor': cls['metallic'],
                'roughnessFactor': cls['roughness']}
-        mat_def = {'name': f"{cls['kind']}_{tex or 'mat'}_{col[0]}_{col[1]}_{col[2]}_{col[3]}",
+        mat_name = f"{cls['kind']}_{tex or 'mat'}_{col[0]}_{col[1]}_{col[2]}_{col[3]}"
+        if mat_name in used_mat_names:  # напр. две краски после --paint
+            used_mat_names[mat_name] += 1
+            mat_name += f"_{used_mat_names[mat_name]}"
+        else:
+            used_mat_names[mat_name] = 1
+        mat_def = {'name': mat_name,
                    'pbrMetallicRoughness': pbr, 'doubleSided': True}
         if cls['alphaMode'] != 'OPAQUE':
             mat_def['alphaMode'] = 'BLEND'
@@ -1204,10 +1254,14 @@ def build_glb(dff, images, out_path):
             print(f"[glb] нода wheel_{side}_steer: translation "
                   f"{[round(v, 3) for v in wpos]} mesh={mtag}")
 
+    # имя модели — корневой фрейм DFF (раньше было захардкожено)
+    model_name = (names[0] if names and names[0] else 'GTA SA vehicle')
+    print(f"[glb] модель: {model_name!r}")
+
     gltf = {
         'asset': {'version': '2.0', 'generator': 'gta-dff-txd-converter'},
         'scene': 0,
-        'scenes': [{'nodes': scene_roots, 'name': 'Renault Symbol 2013'}],
+        'scenes': [{'nodes': scene_roots, 'name': model_name}],
         'nodes': nodes,
         'meshes': meshes,
         'materials': gltf_materials,
@@ -1228,12 +1282,19 @@ def build_glb(dff, images, out_path):
     while len(j) % 4:
         j += b' '
     total = 12 + 8 + len(j) + 8 + len(bin_data)
+    out = bytearray()
+    out += struct.pack('<4sII', b'glTF', 2, total)
+    out += struct.pack('<II', len(j), 0x4E4F534A)
+    out += j
+    out += struct.pack('<II', len(bin_data), 0x004E4942)
+    out += bin_data
+    return bytes(out)
+
+
+def build_glb(dff, images, out_path, paint=None):
+    data = build_glb_bytes(dff, images, paint=paint)
     with open(out_path, 'wb') as f:
-        f.write(struct.pack('<4sII', b'glTF', 2, total))
-        f.write(struct.pack('<II', len(j), 0x4E4F534A))
-        f.write(j)
-        f.write(struct.pack('<II', len(bin_data), 0x004E4942))
-        f.write(bin_data)
+        f.write(data)
     print(f"[glb] записан {out_path} ({os.path.getsize(out_path)//1024//1024} MB)")
 
 
@@ -1243,6 +1304,8 @@ def main():
     ap.add_argument('--txd', required=True)
     ap.add_argument('--out', required=True)
     ap.add_argument('--pngdir', default=None)
+    ap.add_argument('--paint', default=None,
+                    help='цвет кузова в GLB, HEX #rrggbb (как carcols.dat)')
     args = ap.parse_args()
 
     print(f"DFF: {args.dff}\nTXD: {args.txd}")
@@ -1251,7 +1314,7 @@ def main():
     images = txd_to_images(tx, out_dir=args.pngdir)
     dff = parse_dff(args.dff)
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
-    build_glb(dff, images, args.out)
+    build_glb(dff, images, args.out, paint=args.paint)
 
 
 if __name__ == '__main__':

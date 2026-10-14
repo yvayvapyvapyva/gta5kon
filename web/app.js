@@ -118,6 +118,7 @@ function clearCar() {
   steeringNode = null;
   partNodes = {};
   document.getElementById('partsList').innerHTML = '';
+  document.getElementById('modelTitle').textContent = 'Авто GTA SA';
   spinAngle = 0;
 }
 
@@ -257,6 +258,10 @@ function loadGLB(url, label) {
       spinAngle = 0;
       findDrivetrain(car);
       applySpin();
+      // Заголовок — имя модели (сцена из GLB или имя файла).
+      const base = label.replace(/\.[^.]+$/, '');
+      const title = (car.name && car.name !== 'Scene') ? car.name : base;
+      document.getElementById('modelTitle').textContent = title;
       loaderEl.classList.add('hidden');
     },
     (xhr) => {
@@ -269,13 +274,23 @@ function loadGLB(url, label) {
       }
     },
     (err) => {
-      loadText.textContent = 'Ошибка загрузки: ' + err.message;
+      if (label === 'model.glb') {
+        // Встроенной модели нет (проект без bundled-файлов):
+        // дружелюбно зовём в конвертер вместо красной ошибки.
+        loadText.textContent =
+          'Модели пока нет — выбери DFF+TXD в конвертере выше или открой свой GLB.';
+      } else {
+        loadText.textContent = 'Ошибка загрузки: ' + err.message;
+      }
       console.error(err);
     }
   );
 }
 
-loadGLB('model.glb', 'model.glb');
+// Пробуем встроенную модель, если она положена рядом (необязательно).
+fetch('model.glb', { method: 'HEAD' })
+  .then((r) => { if (r.ok) loadGLB('model.glb', 'model.glb'); })
+  .catch(() => {});
 
 // UI
 document.getElementById('gridToggle').addEventListener('change', (e) => {
@@ -286,10 +301,6 @@ document.getElementById('exposure').addEventListener('input', (e) => {
   renderer.toneMappingExposure = parseFloat(e.target.value);
   document.getElementById('exposureVal').textContent = parseFloat(e.target.value).toFixed(2);
 });
-document.getElementById('resetBtn').addEventListener('click', () => {
-  camera.position.copy(CAM_HOME);
-  controls.target.copy(TARGET_HOME);
-});
 document.getElementById('paintApply').addEventListener('click', () => {
   if (!bodyMaterial) return;
   bodyMaterial.color.set(document.getElementById('paint').value);
@@ -299,6 +310,56 @@ document.getElementById('fileInput').addEventListener('change', (e) => {
   if (!f) return;
   const url = URL.createObjectURL(f);
   loadGLB(url, f.name);
+});
+
+// --- Конвертер DFF+TXD -> GLB (нужен бэкенд tools/server.py) ---
+const dffInput = document.getElementById('dffInput');
+const txdInput = document.getElementById('txdInput');
+const convertBtn = document.getElementById('convertBtn');
+const downloadGlb = document.getElementById('downloadGlb');
+const convStatus = document.getElementById('convStatus');
+let convUrl = null;
+fetch('api/health')
+  .then((r) => (r.ok ? r.json() : Promise.reject(new Error('http'))))
+  .then(
+    () => { convStatus.textContent = 'Бэкенд на месте: выбери .dff + .txd и жми кнопку.'; },
+    () => { convStatus.textContent = 'Нет бэкенда — только просмотр. Для конвертации: python3 tools/server.py'; }
+  );
+convertBtn.addEventListener('click', async () => {
+  const dff = dffInput.files[0];
+  const txd = txdInput.files[0];
+  if (!dff || !txd) {
+    convStatus.textContent = 'Выбери оба файла: .dff и .txd.';
+    return;
+  }
+  convertBtn.disabled = true;
+  downloadGlb.classList.add('hidden');
+  convStatus.textContent = `Конвертация ${dff.name} + ${txd.name}… (до минуты)`;
+  try {
+    const fd = new FormData();
+    fd.append('dff', dff, dff.name);
+    fd.append('txd', txd, txd.name);
+    fd.append('paint', document.getElementById('convPaint').value);
+    const res = await fetch('api/convert', { method: 'POST', body: fd });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `HTTP ${res.status}`);
+    }
+    const blob = await res.blob();
+    if (convUrl) URL.revokeObjectURL(convUrl);
+    convUrl = URL.createObjectURL(blob);
+    const base = dff.name.replace(/\.dff$/i, '');
+    downloadGlb.href = convUrl;
+    downloadGlb.download = base + '.glb';
+    downloadGlb.classList.remove('hidden');
+    convStatus.textContent =
+      `Готово: ${base}.glb (${(blob.size / 1024 / 1024).toFixed(1)} МБ) — открыт ниже.`;
+    loadGLB(convUrl, base + '.glb');
+  } catch (e) {
+    convStatus.textContent = 'Ошибка: ' + e.message;
+  } finally {
+    convertBtn.disabled = false;
+  }
 });
 
 // --- Колёса и руль (как в GTA SA): W/S — вращение, A/D — поворот ---

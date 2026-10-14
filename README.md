@@ -1,19 +1,31 @@
-# Renault Symbol 2013 — просмотр 3D-модели из GTA
+# Просмотр 3D-моделей авто из GTA SA (DFF+TXD → GLB)
 
-В папке `reno/` лежат `sentinel.dff` + `sentinel.txd` (RenderWare, GTA SA).
-Файл называется sentinel, но внутри — **Renault Symbol 2013** (59 фреймов, 37 геометрий).
+Своих моделей в проекте нет — работаешь только со своими файлами
+с компьютера: выбираешь `.dff` + `.txd` в блоке «Конвертер DFF+TXD»,
+смотришь результат и забираешь `.glb`.
 
 Веб-приложение: `web/` — Three.js viewer для сконвертированной модели.
 
 ## Быстрый старт
 
 ```bash
-# 1. Конвертация DFF+TXD -> GLB (уже выполнена, model.glb на месте)
-python3 tools/convert.py --dff reno/sentinel.dff --txd reno/sentinel.txd --out web/model.glb
-
-# 2. Запуск просмотрщика
-python3 -m http.server 8000 --directory web
+# 1. Сервер: просмотрщик + веб-конвертер
+python3 tools/server.py
 # открыть http://localhost:8000
+```
+
+В блоке **«Конвертер DFF+TXD»** выбери `.dff` + `.txd`, задай **цвет кузова**
+(запекается в GLB, как `carcols.dat` — красится крупнейший материал-kind
+`paint` без текстуры, тот же критерий, что пикер «Цвет кузова» во вьювере;
+тёмная окантовка и хром не трогаются) → кнопка «В GLB и показать»: модель
+сконвертируется на сервере, сразу откроется в просмотрщике, а забрать
+файл можно кнопкой «Скачать GLB».
+Без бэкенда (простой `python3 -m http.server --directory web`) работает
+только просмотр своего `.glb` через «Открыть GLB».
+
+CLI-конвертация как раньше:
+```bash
+python3 tools/convert.py --dff path/to/car.dff --txd path/to/car.txd --out path/to/car.glb
 ```
 
 ## Что сделано
@@ -59,4 +71,3 @@ python3 -m http.server 8000 --directory web
 
 - Python 3 + `numpy` + `Pillow` (для конвертера)
 - Браузер + интернет (Three.js грузится с unpkg CDN)
-- `model.glb` уже лежит в `web/` — заново конвертировать не нужно

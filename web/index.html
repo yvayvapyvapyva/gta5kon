@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Renault Symbol 2013 — 3D просмотр</title>
+  <title>Авто GTA SA — 3D просмотр и конвертер</title>
   <link rel="stylesheet" href="styles.css" />
   <script type="importmap">
     {
@@ -16,35 +16,50 @@
 </head>
 <body>
   <div id="app">
-    <header class="topbar">
-      <div class="brand">
-        <span class="logo">🚗</span>
-        <div>
-          <h1>Renault Symbol 2013</h1>
-          <p class="sub">GTA SA · sentinel.dff + sentinel.txd → GLB · Three.js viewer</p>
-        </div>
-      </div>
-      <div class="top-actions">
-        <label class="btn file-btn" title="Открыть свой .glb">
-          📂 Открыть GLB
-          <input type="file" id="fileInput" accept=".glb,.gltf" hidden />
-        </label>
-        <button id="resetBtn" class="btn">🎯 Сброс камеры</button>
-      </div>
-    </header>
-
     <main class="layout">
       <section class="viewport-wrap">
         <canvas id="scene"></canvas>
         <div id="loader" class="loader">
           <div class="spinner"></div>
-          <div id="loadText">Загрузка model.glb…</div>
+          <div id="loadText">Модели пока нет — выбери DFF+TXD в конвертере или открой свой GLB</div>
           <div class="progress"><div id="progressBar"></div></div>
         </div>
         <div class="hint">ЛКМ — вращать · колесо — зум · ПКМ — панорама</div>
       </section>
 
       <aside class="panel">
+        <h2 id="modelTitle">Авто GTA SA</h2>
+        <div class="block">
+          <label class="btn file-btn" title="Открыть свой .glb">
+            📂 Открыть GLB
+            <input type="file" id="fileInput" accept=".glb,.gltf" hidden />
+          </label>
+        </div>
+
+        <h2>Конвертер DFF+TXD</h2>
+        <div class="block">
+          <label for="dffInput">DFF-модель (RenderWare)</label>
+          <input type="file" id="dffInput" accept=".dff" />
+        </div>
+        <div class="block">
+          <label for="txdInput">TXD-текстуры</label>
+          <input type="file" id="txdInput" accept=".txd" />
+        </div>
+        <div class="block">
+          <label for="convPaint">Цвет кузова в GLB</label>
+          <div class="paint-row">
+            <input type="color" id="convPaint" value="#3cff00" />
+            <span class="muted">запекается в файл, как carcols.dat</span>
+          </div>
+        </div>
+        <div class="block">
+          <div class="cam-row">
+            <button id="convertBtn" class="btn small">⚙️ В GLB и показать</button>
+            <a id="downloadGlb" class="btn small hidden" href="#" download="model.glb">⬇️ Скачать GLB</a>
+          </div>
+          <p id="convStatus" class="muted">Проверка бэкенда…</p>
+        </div>
+
         <h2>Параметры</h2>
 
         <div class="row">
@@ -110,9 +125,9 @@
 
         <h2>Конвертация</h2>
         <pre class="code">python3 tools/convert.py \
-  --dff reno/sentinel.dff \
-  --txd reno/sentinel.txd \
-  --out web/model.glb</pre>
+  --dff path/to/car.dff \
+  --txd path/to/car.txd \
+  --out path/to/car.glb</pre>
       </aside>
     </main>
   </div>
