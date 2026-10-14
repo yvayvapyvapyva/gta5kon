@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Renault Symbol 2013 — 3D просмотр</title>
+  <link rel="stylesheet" href="styles.css" />
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <div class="brand">
+        <span class="logo">🚗</span>
+        <div>
+          <h1>Renault Symbol 2013</h1>
+          <p class="sub">GTA SA · sentinel.dff + sentinel.txd → GLB · Three.js viewer</p>
+        </div>
+      </div>
+      <div class="top-actions">
+        <label class="btn file-btn" title="Открыть свой .glb">
+          📂 Открыть GLB
+          <input type="file" id="fileInput" accept=".glb,.gltf" hidden />
+        </label>
+        <button id="resetBtn" class="btn">🎯 Сброс камеры</button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="viewport-wrap">
+        <canvas id="scene"></canvas>
+        <div id="loader" class="loader">
+          <div class="spinner"></div>
+          <div id="loadText">Загрузка model.glb…</div>
+          <div class="progress"><div id="progressBar"></div></div>
+        </div>
+        <div class="hint">ЛКМ — вращать · колесо — зум · ПКМ — панорама</div>
+      </section>
+
+      <aside class="panel">
+        <h2>Параметры</h2>
+
+        <div class="row">
+          <label class="switch">
+            <input type="checkbox" id="autoRotate" checked />
+            <span class="slider"></span>
+          </label>
+          <span>Автовращение</span>
+        </div>
+
+        <div class="row">
+          <label class="switch">
+            <input type="checkbox" id="wireframe" />
+            <span class="slider"></span>
+          </label>
+          <span>Каркас (wireframe)</span>
+        </div>
+
+        <div class="row">
+          <label class="switch">
+            <input type="checkbox" id="gridToggle" checked />
+            <span class="slider"></span>
+          </label>
+          <span>Сетка и земля</span>
+        </div>
+
+        <div class="block">
+          <label for="paint">Цвет кузова</label>
+          <div class="paint-row">
+            <input type="color" id="paint" value="#3cff00" />
+            <button id="paintApply" class="btn small">Применить</button>
+          </div>
+          <p class="muted">Красит самый крупный неокрашенный материал (кузов).</p>
+        </div>
+
+        <div class="block">
+          <label for="exposure">Экспозиция: <span id="exposureVal">1.0</span></label>
+          <input type="range" id="exposure" min="0.2" max="2" step="0.05" value="1" />
+        </div>
+
+        <h2>Модель</h2>
+        <dl class="stats">
+          <div><dt>Треугольники</dt><dd id="statTris">—</dd></div>
+          <div><dt>Вершины</dt><dd id="statVerts">—</dd></div>
+          <div><dt>Материалы</dt><dd id="statMats">—</dd></div>
+          <div><dt>Текстуры</dt><dd id="statTex">—</dd></div>
+          <div><dt>Габариты (м)</dt><dd id="statSize">—</dd></div>
+        </dl>
+
+        <h2>Как запустить</h2>
+        <pre class="code">python3 -m http.server 8000 --directory web
+# → http://localhost:8000</pre>
+
+        <h2>Конвертация</h2>
+        <pre class="code">python3 tools/convert.py \
+  --dff reno/sentinel.dff \
+  --txd reno/sentinel.txd \
+  --out web/model.glb</pre>
+      </aside>
+    </main>
+  </div>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
