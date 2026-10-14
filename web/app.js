@@ -76,16 +76,19 @@ let bodyMaterial = null;
 //   вокруг Z Three = колонка Y GTA, пропорционально повороту).
 const FRONT_SIDES = ['rf', 'lf'];
 const ALL_SIDES = ['rf', 'lf', 'rb', 'lb'];
-const STEER_RATIO = 2.5; // руль:поворот, как в игре (руль отзывчивее)
+// Руль: полтора оборота (540°) при полном повороте колёс (±35°).
+const STEER_WHEEL_MAX = 540;
 let steerNodes = {};   // side -> Object3D (yaw)
 let spinNodes = {};    // side -> Object3D (roll)
 let steeringNode = null;
 let spinAngle = 0;     // накопленный угол вращения колёс, рад
 let steerDeg = 0;      // поворот передних колёс, градусы (+ = направо)
-let wheelManualDeg = 0;
-let wheelSpeed = 6.0;  // рад/с (+ = вперёд)
-let spinOn = true;
-let steerLinked = true;
+let wheelSpeed = 0;    // текущая скорость вращения, рад/с (+ = вперёд)
+// Управление как в игре: W/S — газ вперёд/назад, A/D — руль влево/вправо.
+const DRIVE_SPEED = 6.0; // рад/с на удержание W/S
+const STEER_MAX = 35;    // градусы, предел как в SA
+const STEER_RATE = 120;  // град/с — доводка поворота и возврат в центр
+const keysDown = { KeyW: false, KeyS: false, KeyA: false, KeyD: false };
 
 const loaderEl = document.getElementById('loader');
 const loadText = document.getElementById('loadText');
@@ -134,7 +137,7 @@ function findDrivetrain(model) {
   return hasWheels || hasSteering;
 }
 
-// Применяет углы: yaw передних нод + руль.
+// Применяет углы: yaw передних нод + руль (полтора оборота на полном вывороте).
 // Знаки: перед машины смотрит в −Z. Поворот направо (steerDeg>0):
 // ноды steer — rotation.y<0; руль (вид водителя) — rotation.z<0 (по часовой).
 function applySteer() {
@@ -143,7 +146,7 @@ function applySteer() {
     if (steerNodes[side]) steerNodes[side].rotation.y = -steerRad;
   }
   if (!steeringNode) return;
-  const wheelDeg = steerLinked ? steerDeg * STEER_RATIO : wheelManualDeg;
+  const wheelDeg = steerDeg * (STEER_WHEEL_MAX / 35);
   steeringNode.rotation.z = -wheelDeg * Math.PI / 180;
 }
 
@@ -267,33 +270,21 @@ document.getElementById('fileInput').addEventListener('change', (e) => {
   loadGLB(url, f.name);
 });
 
-// --- Колёса и руль (как в GTA SA) ---
-const steerSlider = document.getElementById('steerSlider');
+// --- Колёса и руль (как в GTA SA): W/S — вращение, A/D — поворот ---
 const steerVal = document.getElementById('steerVal');
-steerSlider.addEventListener('input', () => {
-  steerDeg = parseFloat(steerSlider.value);
-  steerVal.textContent = `${steerDeg.toFixed(1)}°`;
-  applySteer();
-});
-const spinSpeed = document.getElementById('spinSpeed');
 const spinVal = document.getElementById('spinVal');
-spinSpeed.addEventListener('input', () => {
-  wheelSpeed = parseFloat(spinSpeed.value);
-  spinVal.textContent = `${wheelSpeed.toFixed(1)} рад/с`;
-});
-document.getElementById('spinToggle').addEventListener('change', (e) => {
-  spinOn = e.target.checked;
-});
-document.getElementById('steerLink').addEventListener('change', (e) => {
-  steerLinked = e.target.checked;
-  applySteer();
-});
-const wheelManual = document.getElementById('wheelManual');
-const wheelManualVal = document.getElementById('wheelManualVal');
-wheelManual.addEventListener('input', () => {
-  wheelManualDeg = parseFloat(wheelManual.value);
-  wheelManualVal.textContent = `${wheelManualDeg.toFixed(0)}°`;
-  applySteer();
+const steerWheelVal = document.getElementById('steerWheelVal');
+function trackKey(e, down) {
+  if (!(e.code in keysDown)) return;
+  const t = e.target;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT')) return;
+  keysDown[e.code] = down;
+  e.preventDefault();
+}
+window.addEventListener('keydown', (e) => trackKey(e, true));
+window.addEventListener('keyup', (e) => trackKey(e, false));
+window.addEventListener('blur', () => {
+  for (const k in keysDown) keysDown[k] = false;
 });
 
 // Пресеты камеры: кузов / колесо RF / салон (руль)
@@ -324,8 +315,22 @@ document.getElementById('camSteer').addEventListener('click', () => {
 const clock = new THREE.Clock();
 renderer.setAnimationLoop(() => {
   const dt = Math.min(clock.getDelta(), 0.05);
-  // Вращение колёс: вперёд (машина смотрит в −Z) — rotation.x уменьшается.
-  if (spinOn && wheelSpeed !== 0 && Object.keys(spinNodes).length) {
+  // A/D: цель поворота (+ = направо на D), плавная доводка и возврат в центр.
+  const steerTarget = (keysDown.KeyD ? STEER_MAX : 0) + (keysDown.KeyA ? -STEER_MAX : 0);
+  if (steerTarget !== steerDeg) {
+    const step = STEER_RATE * dt;
+    steerDeg += Math.max(-step, Math.min(step, steerTarget - steerDeg));
+    applySteer();
+    steerVal.textContent = `${steerDeg.toFixed(0)}°`;
+    steerWheelVal.textContent = `${(steerDeg * (STEER_WHEEL_MAX / 35)).toFixed(0)}°`;
+  }
+  // W/S: вращение колёс. Вперёд (машина смотрит в −Z) — rotation.x уменьшается.
+  const targetSpeed = (keysDown.KeyW ? DRIVE_SPEED : 0) + (keysDown.KeyS ? -DRIVE_SPEED : 0);
+  if (targetSpeed !== wheelSpeed) {
+    wheelSpeed = targetSpeed;
+    spinVal.textContent = wheelSpeed > 0 ? 'вперёд' : wheelSpeed < 0 ? 'назад' : 'стоят';
+  }
+  if (wheelSpeed !== 0 && Object.keys(spinNodes).length) {
     spinAngle -= wheelSpeed * dt;
     applySpin();
   }
