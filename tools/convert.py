@@ -1003,16 +1003,22 @@ def build_glb_bytes(dff, images, paint=None):
                         (wheelR_order, wheelR_groups),
                         (wheelL_order, wheelL_groups)]
 
-    # --- цвет кузова: перекрашиваем ТОЛЬКО главный кузовной материал ---
+    # --- цвет кузова: выбор группы + RGB (применяется при сборке материалов) ---
     # Тот же критерий, что пикер вьювера: крупнейшая группа-kind 'paint'
-    # без текстуры. Красить все paint-группы нельзя: тёмная окантовка
-    # (4,4,4) тоже kind=='paint', и вся машина заливалась бы одним цветом.
+    # без текстуры. Тёмная окантовка (4,4,4) — тоже paint, но мельче,
+    # поэтому не трогается.
+    # ВАЖНО: саму группу НЕ мутируем — классификация kind/metallic/roughness
+    # должна считаться от ИСХОДНОГО цвета. Иначе белый (255,255,255) после
+    # перекраски сам станет 'chrome' (яркий+серый) и запечётся зеркалом
+    # вместо белой краски.
+    paint_key = None
+    paint_rgb = None
     if paint is not None:
         try:
-            pr, pg_, pb = parse_paint(paint)
+            paint_rgb = parse_paint(paint)
         except ValueError as e:
             raise ValueError(f'плохой цвет кузова: {e}')
-        best, best_tris = None, -1
+        best_tris = -1
         for _o, _g in stores_in_order:
             for k in _o:
                 gr = _g[k]
@@ -1020,14 +1026,12 @@ def build_glb_bytes(dff, images, paint=None):
                     continue
                 t = len(gr['idx']) // 3
                 if t > best_tris:
-                    best, best_tris = gr, t
-        if best is None:
+                    paint_key, best_tris = k, t
+        if paint_key is None:
             print("[glb] краска не найдена — цвет кузова пропущен")
         else:
-            r0, g0, b0, a0 = best['mat'].get('color', (255, 255, 255, 255))
-            best['mat']['color'] = (pr, pg_, pb, a0)
-            print(f"[glb] краска кузова ({best_tris} tris, был "
-                  f"#{r0:02X}{g0:02X}{b0:02X}) -> #{pr:02X}{pg_:02X}{pb:02X}")
+            print(f"[glb] краска кузова ({best_tris} tris) -> "
+                  f"#{paint_rgb[0]:02X}{paint_rgb[1]:02X}{paint_rgb[2]:02X}")
 
     # общий порядок материалов: статика, детали, руль, колёса
     order = []
@@ -1068,7 +1072,9 @@ def build_glb_bytes(dff, images, paint=None):
         m = gr['mat']
         tex = m.get('texture')
         col = m.get('color', (255, 255, 255, 255))
-        cls = classify_material(m)
+        cls = classify_material(m)  # всегда от исходного цвета!
+        if key == paint_key and paint_rgb is not None:
+            col = (paint_rgb[0], paint_rgb[1], paint_rgb[2], col[3])
         base = [col[0] / 255.0, col[1] / 255.0, col[2] / 255.0, cls['opacity']]
         pbr = {'baseColorFactor': base, 'metallicFactor': cls['metallic'],
                'roughnessFactor': cls['roughness']}
