@@ -734,15 +734,33 @@ def build_glb(dff, images, out_path):
 
     # --- руль: центрируем вершины на пивот (bbox-центр), нода несёт позицию ---
     steer_pivot_three = [0.0, 0.0, 0.0]
+    steer_axis_three = [0.0, 0.0, -1.0]  # дефолт: как раньше (чистый Z Three)
     if g_steer is not None and g_steer['verts'] is not None:
         Vw_s, Nw_s, UV_s = world_verts(g_steer, steer_wheel_fi)
         mn, mx = Vw_s.min(axis=0), Vw_s.max(axis=0)
         C = (mn + mx) / 2.0
         steer_pivot_three = gta_to_three_p(C)
+        # Ось колонки = нормаль к плоскости руля = ось минимальной
+        # дисперсии вершин (PCA). Кручение вокруг чистой Y GTA при
+        # наклонной колонке давало бы конусное биение — поэтому ось
+        # измеряем, а не предполагаем.
+        Vc = Vw_s - Vw_s.mean(axis=0)
+        cov = np.cov(Vc.T)
+        vals, vecs = np.linalg.eigh(cov)
+        axis = vecs[:, 0]
+        axis = axis / (np.linalg.norm(axis) or 1.0)
+        if axis[1] < 0.0:  # ориентируем вперёд (+Y GTA)
+            axis = -axis
+        tilt = float(np.degrees(np.arccos(np.clip(axis[1], -1.0, 1.0))))
+        ax_t = np.array([axis[0], axis[2], -axis[1]])
+        ax_t = ax_t / (np.linalg.norm(ax_t) or 1.0)
+        steer_axis_three = [float(v) for v in ax_t]
         emit_job(steer_groups, steer_order, g_steer,
                  Vw_s - C, Nw_s, UV_s, 'steering', False)
         print(f"[glb] руль: фрейм {steer_wheel_fi}, пивот GTA {C.round(3).tolist()} "
-              f"-> Three {[round(v, 3) for v in steer_pivot_three]}")
+              f"-> Three {[round(v, 3) for v in steer_pivot_three]}; "
+              f"ось колонки GTA {np.round(axis, 3).tolist()} "
+              f"(наклон {tilt:.1f}° от +Y)")
     else:
         print("[glb] руль не найден — нода руля будет пустой")
 
@@ -926,9 +944,11 @@ def build_glb(dff, images, out_path):
 
     if 'steer' in mesh_idx:
         n_sw = add_node({'mesh': mesh_idx['steer'], 'name': 'steering',
-                         'translation': steer_pivot_three})
+                         'translation': steer_pivot_three,
+                         'extras': {'steer_axis': steer_axis_three}})
         scene_roots.append(n_sw)
-        print(f"[glb] нода steering: translation {steer_pivot_three}")
+        print(f"[glb] нода steering: translation {steer_pivot_three} "
+              f"axis {steer_axis_three}")
     else:
         n_sw = None
 

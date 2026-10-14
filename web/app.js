@@ -81,6 +81,9 @@ const STEER_WHEEL_MAX = 540;
 let steerNodes = {};   // side -> Object3D (yaw)
 let spinNodes = {};    // side -> Object3D (roll)
 let steeringNode = null;
+// Ось рулевой колонки в координатах сцены (приходит из GLB extras,
+// измерена конвертером по плоскости руля; дефолт = старый чистый Z).
+const steerAxis = new THREE.Vector3(0, 0, -1);
 let spinAngle = 0;     // накопленный угол вращения колёс, рад
 let steerDeg = 0;      // поворот передних колёс, градусы (+ = направо)
 let wheelSpeed = 0;    // текущая скорость вращения, рад/с (+ = вперёд)
@@ -121,6 +124,7 @@ function findDrivetrain(model) {
   steerNodes = {};
   spinNodes = {};
   steeringNode = null;
+  steerAxis.set(0, 0, -1);
   model.traverse((o) => {
     if (!o.isMesh && !o.isGroup && !o.isObject3D) return;
     const m = /^wheel_(rf|lf|rb|lb)_steer$/.exec(o.name || '');
@@ -129,6 +133,11 @@ function findDrivetrain(model) {
     if (s) spinNodes[s[1]] = o;
     if (o.name === 'steering') steeringNode = o;
   });
+  // GLTFLoader кладёт extras ноды в userData — там ось колонки из конвертера.
+  const ax = steeringNode && steeringNode.userData && steeringNode.userData.steer_axis;
+  if (Array.isArray(ax) && ax.length === 3) {
+    steerAxis.fromArray(ax).normalize();
+  }
   const hasWheels = Object.keys(spinNodes).length > 0;
   const hasSteering = !!steeringNode;
   document.getElementById('wheelsPanel').classList.toggle('hidden', !(hasWheels || hasSteering));
@@ -138,16 +147,19 @@ function findDrivetrain(model) {
 }
 
 // Применяет углы: yaw передних нод + руль (полтора оборота на полном вывороте).
+// Руль крутится вокруг измеренной оси колонки (а не чистого Z): иначе
+// наклонная колонка давала бы конусное биение.
 // Знаки: перед машины смотрит в −Z. Поворот направо (steerDeg>0):
-// ноды steer — rotation.y<0; руль (вид водителя) — rotation.z<0 (по часовой).
+// ноды steer — rotation.y<0; руль — положительный угол вокруг оси,
+// смотрящей вперёд (по часовой с места водителя).
 function applySteer() {
   const steerRad = steerDeg * Math.PI / 180;
   for (const side of FRONT_SIDES) {
     if (steerNodes[side]) steerNodes[side].rotation.y = -steerRad;
   }
   if (!steeringNode) return;
-  const wheelDeg = steerDeg * (STEER_WHEEL_MAX / 35);
-  steeringNode.rotation.z = -wheelDeg * Math.PI / 180;
+  const wheelRad = steerDeg * (STEER_WHEEL_MAX / 35) * Math.PI / 180;
+  steeringNode.quaternion.setFromAxisAngle(steerAxis, wheelRad);
 }
 
 function applySpin() {
