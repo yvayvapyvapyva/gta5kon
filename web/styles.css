@@ -76,6 +76,9 @@ body {
 .block { margin: 12px 0; }
 .block label { display: block; margin-bottom: 6px; font-size: 14px; }
 .paint-row { display: flex; gap: 8px; align-items: center; }
+.cam-row { display: flex; gap: 8px; flex-wrap: wrap; }
+.hidden { display: none !important; }
+code { font-size: 11px; }
 input[type="color"] { width: 48px; height: 32px; border: none; background: none; padding: 0; }
 input[type="range"] { width: 100%; }
 .muted { color: var(--muted); font-size: 12px; }

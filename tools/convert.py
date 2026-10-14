@@ -388,6 +388,44 @@ def parse_dff(path):
         else:
             W_R[i] = W_R[par] @ lr
             W_T[i] = W_R[par] @ lt + W_T[par]
+    # --- имена фреймов (FrameList extensions 0x03 -> 0x0253F2FE) ---
+    # Имя может быть в cp1251 (напр. b'\xf0\xf3\xeb\xfc' = "руль").
+    frame_names = []
+    try:
+        fp_ext = fpos + 12 + fs
+        for _ in range(nframes):
+            if fp_ext + 12 > fl_end:
+                break
+            et, es, ev = struct.unpack_from('<III', data, fp_ext)
+            eend = fp_ext + 12 + es
+            name = ''
+            if et == 0x03:
+                q = fp_ext + 12
+                while q + 12 <= eend:
+                    st, ss, sv = struct.unpack_from('<III', data, q)
+                    send = q + 12 + ss
+                    if send > eend:
+                        break
+                    if st == 0x0253F2FE and ss > 0:
+                        raw = data[q + 12:send].split(b'\x00')[0]
+                        for enc in ('ascii', 'cp1251', 'utf-8'):
+                            try:
+                                name = raw.decode(enc)
+                                break
+                            except Exception:
+                                continue
+                        # ascii удался, но там мусорные байты >127? перепроверим cp1251
+                        if any(ord(c) > 127 and enc == 'ascii' for c in name):
+                            pass
+                        break
+                    q = send
+            frame_names.append(name)
+            fp_ext = eend
+    except Exception as e:
+        print(f"[dff] не удалось прочитать имена фреймов: {e}")
+    while len(frame_names) < nframes:
+        frame_names.append('')
+    print(f"[dff] имена фреймов: {[n or '?' for n in frame_names[:8]]} ...")
     pos = fl_end
     # GeometryList
     t3, s3, v3 = struct.unpack_from('<III', data, pos)
@@ -513,6 +551,7 @@ def parse_dff(path):
     return {
         'frames': frames, 'W_R': W_R, 'W_T': W_T,
         'geoms': geoms, 'atomics': atomics,
+        'frame_names': frame_names,
     }
 
 
@@ -560,9 +599,13 @@ def build_glb(dff, images, out_path):
             UV = np.zeros((len(Vw), 2), dtype=np.float32)
         return Vw, Nw, UV
 
-    def emit_job(g, Vw, Nw, UV, tag, flip):
+    def new_store():
+        return {}, []
+
+    def emit_job(groups, order, g, Vw, Nw, UV, tag, flip):
         """Складывает треугольники в группы материалов.
-        Vw/Nw — мировые координаты GTA; flip=True зеркалит обход (для зеркал)."""
+        Vw/Nw — координаты GTA (мировые для кузова, локальные для
+        руля/колёс — нода несёт трансляцию); flip=True зеркалит обход."""
         nonlocal total_tris
         # конвертация GTA -> Three: (x, y, z) -> (x, z, -y)
         P = np.empty_like(Vw)
@@ -609,40 +652,133 @@ def build_glb(dff, images, out_path):
                 gr['idx'].extend([mp[(tag, a)], mp[(tag, b)], mp[(tag, c)]])
             total_tris += 1
 
-    jobs = []  # (g, Vw, Nw, UV, tag, flip)
+    # --- как устроено в GTA SA ---
+    # Кузов/салон/двери/бамперы: статика, запекаем мировые трансляции.
+    # Колёса: wheel_*_dummy — нода поворота (yaw вокруг Z GTA / Y Three,
+    # только передние), wheel mesh (здесь wheel_sr6, клон на 4 угла игрой) —
+    # нода вращения (вокруг оси X GTA / X Three). Левый борт — зеркально.
+    # Руль в салоне (здесь фрейм "руль"): крутится вокруг колонки
+    # (ось Y GTA / Z Three) пропорционально повороту передних колёс.
+    names = dff.get('frame_names', []) or []
+    atomics_by_frame = {}
     for at in atomics:
-        gi = at['geom']
+        atomics_by_frame.setdefault(at['frame'], at)
+
+    def find_frame(*cands, fallback=None):
+        for c in cands:
+            for i, n in enumerate(names):
+                if n == c or n.lower() == c.lower():
+                    return i
+        return fallback
+
+    nframes = len(dff['frames'])
+    FI = lambda i: i if (i is not None and 0 <= i < nframes) else None
+    wheel_mesh_fi = FI(find_frame('wheel_sr6', fallback=55))
+    steer_fis = {
+        'rf': FI(find_frame('wheel_rf_dummy', fallback=54)),
+        'lf': FI(find_frame('wheel_lf_dummy', fallback=56)),
+        'rb': FI(find_frame('wheel_rb_dummy', fallback=57)),
+        'lb': FI(find_frame('wheel_lb_dummy', fallback=58)),
+    }
+    # "руль" в cp1251 уже декодирован в parse_dff
+    steer_wheel_fi = FI(find_frame('руль', 'rul', 'steering', 'steering_wheel',
+                                   fallback=8))
+    print(f"[glb] фреймы: wheel_mesh={wheel_mesh_fi} ({names[wheel_mesh_fi] if wheel_mesh_fi is not None and wheel_mesh_fi < len(names) else '?'}) "
+          f"dummies={steer_fis} руль={steer_wheel_fi}")
+
+    def gta_to_three_p(p):
+        p = np.asarray(p, dtype=np.float64)
+        return [float(p[0]), float(p[2]), float(-p[1])]
+
+    W = lambda i: np.asarray(W_T[i], dtype=np.float64)
+
+    static_groups, static_order = new_store()
+    wheelR_groups, wheelR_order = new_store()  # правый борт (оригинал)
+    wheelL_groups, wheelL_order = new_store()  # левый борт (зеркало)
+    steer_groups, steer_order = new_store()    # руль в салоне
+
+    g_wheel = None
+    if wheel_mesh_fi in atomics_by_frame:
+        g_wheel = geoms[atomics_by_frame[wheel_mesh_fi]['geom']]
+    elif wheel_mesh_fi is not None:
+        # фрейм есть, но без атомика — ищем геометрию колеса по форме:
+        # узкая по X (ступица), круглая в Y-Z
+        best, best_score = None, 1e9
+        for g in geoms:
+            if g['verts'] is None:
+                continue
+            mn, mx = g['verts'].min(axis=0), g['verts'].max(axis=0)
+            ext = mx - mn
+            if ext[0] < 0.45 and abs(ext[1] - ext[2]) < 0.15 * max(ext[1], ext[2]):
+                score = abs(ext[0] - 0.27)
+                if score < best_score:
+                    best, best_score = g, score
+        g_wheel = best
+
+    g_steer = None
+    if steer_wheel_fi in atomics_by_frame:
+        g_steer = geoms[atomics_by_frame[steer_wheel_fi]['geom']]
+
+    # --- статика: все атомики кроме колеса и руля ---
+    static_jobs = 0
+    for at in atomics:
         fi = at['frame']
-        g = geoms[gi]
+        if fi == wheel_mesh_fi or fi == steer_wheel_fi:
+            continue
+        g = geoms[at['geom']]
         if g['verts'] is None or g['tris'] is None:
             continue
         Vw, Nw, UV = world_verts(g, fi)
-        jobs.append((g, Vw, Nw, UV, gi, False))
+        emit_job(static_groups, static_order, g, Vw, Nw, UV, at['geom'], False)
+        static_jobs += 1
 
-    # --- недостающие колёса: в DFF есть только wheel_sr6 (переднее правое) ---
-    # Клонируем его на пустые dummy LF/RB/LB; на левый борт — зеркально.
-    try:
-        w_at = next(at for at in atomics if at['frame'] == 55)
-        g_w = geoms[w_at['geom']]
-        base = next(j for j in jobs if j[0] is g_w)
-        _, Vw0, Nw0, UV0, _, _ = base
-        W = lambda i: np.asarray(W_T[i], dtype=np.float64)
-        RF_c = W(54)
+    # --- руль: центрируем вершины на пивот (bbox-центр), нода несёт позицию ---
+    steer_pivot_three = [0.0, 0.0, 0.0]
+    if g_steer is not None and g_steer['verts'] is not None:
+        Vw_s, Nw_s, UV_s = world_verts(g_steer, steer_wheel_fi)
+        mn, mx = Vw_s.min(axis=0), Vw_s.max(axis=0)
+        C = (mn + mx) / 2.0
+        steer_pivot_three = gta_to_three_p(C)
+        emit_job(steer_groups, steer_order, g_steer,
+                 Vw_s - C, Nw_s, UV_s, 'steering', False)
+        print(f"[glb] руль: фрейм {steer_wheel_fi}, пивот GTA {C.round(3).tolist()} "
+              f"-> Three {[round(v, 3) for v in steer_pivot_three]}")
+    else:
+        print("[glb] руль не найден — нода руля будет пустой")
+
+    # --- колёса: локальная геометрия (центр ~0), ноды несут позиции dummy ---
+    wheel_ok = g_wheel is not None and g_wheel['verts'] is not None
+    if wheel_ok:
+        V0 = g_wheel['verts'].astype(np.float64)
+        N0 = (g_wheel['normals'].astype(np.float64) if g_wheel['normals'] is not None
+              else np.zeros_like(V0))
+        UV0 = (g_wheel['uvs'].copy() if g_wheel['uvs'] is not None
+               else np.zeros((len(V0), 2), dtype=np.float32))
         mir = np.array([-1.0, 1.0, 1.0])
-        Vm, Nm, mir_c = Vw0 * mir, Nw0 * mir, RF_c * mir
-        for fi_t, do_mirror in ((56, True), (57, False), (58, True)):
-            Ct = W(fi_t)
-            if do_mirror:
-                jobs.append((g_w, Vm + (Ct - mir_c), Nm, UV0, f'wheel{fi_t}', True))
-            else:
-                jobs.append((g_w, Vw0 + (Ct - RF_c), Nw0, UV0, f'wheel{fi_t}', False))
-        print("[glb] клонировано колесо wheel_sr6 на фреймы 56/57/58 (LF/RB/LB)")
-    except (StopIteration, IndexError) as e:
-        print(f"[glb] колесо-донор не найдено, клонирование пропущено ({e})")
+        emit_job(wheelR_groups, wheelR_order, g_wheel, V0, N0, UV0, 'wheelR', False)
+        emit_job(wheelL_groups, wheelL_order, g_wheel,
+                 V0 * mir, N0 * mir, UV0, 'wheelL', True)
+        print(f"[glb] колесо: вершин {len(V0)}, tris {len(g_wheel['tris'])} "
+              f"(R/L варианты собраны)")
+    else:
+        print("[glb] ВНИМАНИЕ: геометрия колеса не найдена!")
 
-    for g, Vw, Nw, UV, tag, flip in jobs:
-        emit_job(g, Vw, Nw, UV, tag, flip)
-    print(f"[glb] треугольников: {total_tris}, групп материалов: {len(groups)}")
+    # (пустой цикл-заглушка удалён; emit идёт по сторам выше)
+    print(f"[glb] треугольников (статика/руль/колесоR/колесоL): "
+          f"{sum(len(gr['idx']) // 3 for gr in static_groups.values())}/"
+          f"{sum(len(gr['idx']) // 3 for gr in steer_groups.values())}/"
+          f"{sum(len(gr['idx']) // 3 for gr in wheelR_groups.values())}/"
+          f"{sum(len(gr['idx']) // 3 for gr in wheelL_groups.values())}; "
+          f"статика: {static_jobs} атомиков")
+    # общий порядок материалов: статика, руль, колёса
+    order = []
+    for _o in (static_order, steer_order, wheelR_order, wheelL_order):
+        for k in _o:
+            if k not in order:
+                order.append(k)
+    groups = {}
+    for _g in (static_groups, steer_groups, wheelR_groups, wheelL_groups):
+        groups.update(_g)
     for k in order:
         gr = groups[k]
         cls = classify_material(gr['mat'])
@@ -698,9 +834,7 @@ def build_glb(dff, images, out_path):
         mat_index[key] = len(gltf_materials)
         gltf_materials.append(mat_def)
 
-    # геометрия: одна mesh с примитивами по группам
-    primitives = []
-    voffset = 0
+    # геометрия: по одному mesh на часть (кузов/руль/колёса)
     bin_data = bytearray()
 
     def add_view(data_bytes, target=None):
@@ -717,54 +851,115 @@ def build_glb(dff, images, out_path):
         buffer_views.append(d)
         return idx
 
-    # сначала добавим изображения в bin (после геометрии? порядок неважен, но добавим в конец)
-    # Собираем геометрию
-    for key in order:
-        gr = groups[key]
-        pos_arr = np.array(gr['pos'], dtype=np.float32)
-        nor_arr = np.array(gr['nor'], dtype=np.float32)
-        uv_arr = np.array(gr['uv'], dtype=np.float32)
-        idx_arr = np.array(gr['idx'], dtype=np.uint32)
-        # bounds
-        mn = pos_arr.min(axis=0).tolist() if len(pos_arr) else [0, 0, 0]
-        mx = pos_arr.max(axis=0).tolist() if len(pos_arr) else [0, 0, 0]
-        bv_pos = add_view(pos_arr.tobytes(), 34962)
-        acc_pos = len(accessors)
-        accessors.append({'bufferView': bv_pos, 'componentType': 5126,
-                          'count': len(pos_arr), 'type': 'VEC3',
-                          'min': mn, 'max': mx})
-        bv_nor = add_view(nor_arr.tobytes(), 34962)
-        acc_nor = len(accessors)
-        accessors.append({'bufferView': bv_nor, 'componentType': 5126,
-                          'count': len(nor_arr), 'type': 'VEC3'})
-        m = gr['mat']
-        tex = m.get('texture')
-        prim = {'attributes': {'POSITION': acc_pos, 'NORMAL': acc_nor},
-                'indices': None, 'material': mat_index[key], 'mode': 4}
-        if tex and tex in tex_index:
-            bv_uv = add_view(uv_arr.tobytes(), 34962)
-            acc_uv = len(accessors)
-            accessors.append({'bufferView': bv_uv, 'componentType': 5126,
-                              'count': len(uv_arr), 'type': 'VEC2'})
-            prim['attributes']['TEXCOORD_0'] = acc_uv
-        bv_idx = add_view(idx_arr.tobytes(), 34963)
-        acc_idx = len(accessors)
-        accessors.append({'bufferView': bv_idx, 'componentType': 5125,
-                          'count': len(idx_arr), 'type': 'SCALAR'})
-        prim['indices'] = acc_idx
-        primitives.append(prim)
+    # Собираем геометрию: по одному mesh на часть
+    # (кузов / руль / колесо-R / колесо-L), примитивы — по группам материалов.
+    def build_primitives(keys, store):
+        prims = []
+        for key in keys:
+            gr = store[key]
+            pos_arr = np.array(gr['pos'], dtype=np.float32)
+            nor_arr = np.array(gr['nor'], dtype=np.float32)
+            uv_arr = np.array(gr['uv'], dtype=np.float32)
+            idx_arr = np.array(gr['idx'], dtype=np.uint32)
+            # bounds
+            mn = pos_arr.min(axis=0).tolist() if len(pos_arr) else [0, 0, 0]
+            mx = pos_arr.max(axis=0).tolist() if len(pos_arr) else [0, 0, 0]
+            bv_pos = add_view(pos_arr.tobytes(), 34962)
+            acc_pos = len(accessors)
+            accessors.append({'bufferView': bv_pos, 'componentType': 5126,
+                              'count': len(pos_arr), 'type': 'VEC3',
+                              'min': mn, 'max': mx})
+            bv_nor = add_view(nor_arr.tobytes(), 34962)
+            acc_nor = len(accessors)
+            accessors.append({'bufferView': bv_nor, 'componentType': 5126,
+                              'count': len(nor_arr), 'type': 'VEC3'})
+            m = gr['mat']
+            tex = m.get('texture')
+            prim = {'attributes': {'POSITION': acc_pos, 'NORMAL': acc_nor},
+                    'indices': None, 'material': mat_index[key], 'mode': 4}
+            if tex and tex in tex_index:
+                bv_uv = add_view(uv_arr.tobytes(), 34962)
+                acc_uv = len(accessors)
+                accessors.append({'bufferView': bv_uv, 'componentType': 5126,
+                                  'count': len(uv_arr), 'type': 'VEC2'})
+                prim['attributes']['TEXCOORD_0'] = acc_uv
+            bv_idx = add_view(idx_arr.tobytes(), 34963)
+            acc_idx = len(accessors)
+            accessors.append({'bufferView': bv_idx, 'componentType': 5125,
+                              'count': len(idx_arr), 'type': 'SCALAR'})
+            prim['indices'] = acc_idx
+            prims.append(prim)
+        return prims
+
+    meshes = []
+    mesh_idx = {}  # 'static' | 'steer' | 'wheelR' | 'wheelL' -> idx
+    for tag, keys, store, mname in (
+        ('static', static_order, static_groups, 'chassis'),
+        ('steer', steer_order, steer_groups, 'steering_wheel'),
+        ('wheelR', wheelR_order, wheelR_groups, 'wheel_R'),
+        ('wheelL', wheelL_order, wheelL_groups, 'wheel_L'),
+    ):
+        if not keys:
+            continue
+        mesh_idx[tag] = len(meshes)
+        meshes.append({'name': mname, 'primitives': build_primitives(keys, store)})
 
     # изображения
     for name, (blob, mime, has_alpha, wh) in images.items():
         bv = add_view(blob)
         images_j[tex_index[name]]['bufferView'] = bv
 
+    # --- иерархия нод (как в GTA SA) ---
+    # chassis (статика, вершины уже в мире) +
+    # steering (пивот на центре руля, вращение — ось Z Three = колонка Y GTA) +
+    # wheel_{rf,lf,rb,lb}_steer (трансляция dummy, yaw) ->
+    #   wheel_*_spin (вращение вокруг X) с мешем колеса.
+    nodes = []
+    scene_roots = []
+
+    def add_node(d):
+        nodes.append(d)
+        return len(nodes) - 1
+
+    n_chassis = add_node({'mesh': mesh_idx['static'], 'name': 'chassis'})
+    scene_roots.append(n_chassis)
+
+    if 'steer' in mesh_idx:
+        n_sw = add_node({'mesh': mesh_idx['steer'], 'name': 'steering',
+                         'translation': steer_pivot_three})
+        scene_roots.append(n_sw)
+        print(f"[glb] нода steering: translation {steer_pivot_three}")
+    else:
+        n_sw = None
+
+    wheel_nodes = {}  # rf/lf/rb/lb -> (steer_idx, spin_idx)
+    if 'wheelR' in mesh_idx or 'wheelL' in mesh_idx:
+        for side, fi_key in (('rf', 'rf'), ('lf', 'lf'), ('rb', 'rb'), ('lb', 'lb')):
+            fi = steer_fis.get(fi_key)
+            if fi is None or fi >= len(W_T):
+                print(f"[glb] dummy {fi_key} отсутствует — колесо пропущено")
+                continue
+            is_left = side in ('lf', 'lb')
+            mtag = 'wheelL' if is_left else 'wheelR'
+            if mtag not in mesh_idx:
+                mtag = 'wheelR' if 'wheelR' in mesh_idx else 'wheelL'
+            n_steer = add_node({'name': f'wheel_{side}_steer',
+                                'translation': gta_to_three_p(W(fi))})
+            n_spin = add_node({'mesh': mesh_idx[mtag],
+                               'name': f'wheel_{side}_spin'})
+            nodes[n_steer]['children'] = [n_spin]
+            scene_roots.append(n_steer)
+            wheel_nodes[side] = (n_steer, n_spin)
+            wpos = gta_to_three_p(W(fi))
+            print(f"[glb] нода wheel_{side}_steer: translation "
+                  f"{[round(v, 3) for v in wpos]} mesh={mtag}")
+
     gltf = {
         'asset': {'version': '2.0', 'generator': 'gta-dff-txd-converter'},
         'scene': 0,
-        'scenes': [{'nodes': [0], 'name': 'Renault Symbol 2013'}],
-        'nodes': [{'mesh': 0, 'name': 'sentinel'}],
-        'meshes': [{'name': 'sentinel', 'primitives': primitives}],
+        'scenes': [{'nodes': scene_roots, 'name': 'Renault Symbol 2013'}],
+        'nodes': nodes,
+        'meshes': meshes,
         'materials': gltf_materials,
         'textures': textures,
         'images': images_j,
@@ -775,13 +970,13 @@ def build_glb(dff, images, out_path):
     }
     if use_clearcoat:
         gltf['extensionsUsed'] = ['KHR_materials_clearcoat']
+    # выравнивание bin ДО упаковки JSON, чтобы byteLength был точным
+    while len(bin_data) % 4:
+        bin_data.append(0)
+    gltf['buffers'] = [{'byteLength': len(bin_data)}]
     j = json.dumps(gltf, separators=(',', ':')).encode('utf-8')
     while len(j) % 4:
         j += b' '
-    total = 12 + 8 + len(j) + 8 + len(bin_data)
-    # выравнивание bin
-    while len(bin_data) % 4:
-        bin_data.append(0)
     total = 12 + 8 + len(j) + 8 + len(bin_data)
     with open(out_path, 'wb') as f:
         f.write(struct.pack('<4sII', b'glTF', 2, total))

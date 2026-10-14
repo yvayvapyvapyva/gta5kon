@@ -26,10 +26,8 @@ camera.position.copy(CAM_HOME);
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.target.copy(TARGET_HOME);
 controls.enableDamping = true;
-controls.autoRotate = true;
-controls.autoRotateSpeed = 1.2;
 controls.maxDistance = 30;
-controls.minDistance = 1.2;
+controls.minDistance = 0.3;
 controls.maxPolarAngle = Math.PI * 0.495;
 
 // свет
@@ -69,7 +67,25 @@ resize();
 // состояние
 let car = null;
 let bodyMaterial = null;
-let allMaterials = [];
+
+// Ходовая как в GTA SA:
+// - wheel_{rf,lf,rb,lb}_steer — ноды поворота (yaw вокруг Y Three =
+//   вертикаль Z GTA; поворачиваются ТОЛЬКО передние rf/lf, ±35°);
+// - wheel_*_spin — ноды вращения (вокруг X Three = ось ступицы X GTA);
+// - steering — руль в салоне (фрейм «руль», пивот на центре; вращение
+//   вокруг Z Three = колонка Y GTA, пропорционально повороту).
+const FRONT_SIDES = ['rf', 'lf'];
+const ALL_SIDES = ['rf', 'lf', 'rb', 'lb'];
+const STEER_RATIO = 2.5; // руль:поворот, как в игре (руль отзывчивее)
+let steerNodes = {};   // side -> Object3D (yaw)
+let spinNodes = {};    // side -> Object3D (roll)
+let steeringNode = null;
+let spinAngle = 0;     // накопленный угол вращения колёс, рад
+let steerDeg = 0;      // поворот передних колёс, градусы (+ = направо)
+let wheelManualDeg = 0;
+let wheelSpeed = 6.0;  // рад/с (+ = вперёд)
+let spinOn = true;
+let steerLinked = true;
 
 const loaderEl = document.getElementById('loader');
 const loadText = document.getElementById('loadText');
@@ -90,7 +106,51 @@ function clearCar() {
   });
   car = null;
   bodyMaterial = null;
-  allMaterials = [];
+  steerNodes = {};
+  spinNodes = {};
+  steeringNode = null;
+  spinAngle = 0;
+}
+
+// Находит ноды ходовой по именам (иерархия из convert.py).
+// Возвращает true, если есть хотя бы колёса или руль.
+function findDrivetrain(model) {
+  steerNodes = {};
+  spinNodes = {};
+  steeringNode = null;
+  model.traverse((o) => {
+    if (!o.isMesh && !o.isGroup && !o.isObject3D) return;
+    const m = /^wheel_(rf|lf|rb|lb)_steer$/.exec(o.name || '');
+    if (m) steerNodes[m[1]] = o;
+    const s = /^wheel_(rf|lf|rb|lb)_spin$/.exec(o.name || '');
+    if (s) spinNodes[s[1]] = o;
+    if (o.name === 'steering') steeringNode = o;
+  });
+  const hasWheels = Object.keys(spinNodes).length > 0;
+  const hasSteering = !!steeringNode;
+  document.getElementById('wheelsPanel').classList.toggle('hidden', !(hasWheels || hasSteering));
+  document.getElementById('wheelsNote').classList.toggle('hidden', hasWheels && hasSteering);
+  applySteer();
+  return hasWheels || hasSteering;
+}
+
+// Применяет углы: yaw передних нод + руль.
+// Знаки: перед машины смотрит в −Z. Поворот направо (steerDeg>0):
+// ноды steer — rotation.y<0; руль (вид водителя) — rotation.z<0 (по часовой).
+function applySteer() {
+  const steerRad = steerDeg * Math.PI / 180;
+  for (const side of FRONT_SIDES) {
+    if (steerNodes[side]) steerNodes[side].rotation.y = -steerRad;
+  }
+  if (!steeringNode) return;
+  const wheelDeg = steerLinked ? steerDeg * STEER_RATIO : wheelManualDeg;
+  steeringNode.rotation.z = -wheelDeg * Math.PI / 180;
+}
+
+function applySpin() {
+  for (const side of ALL_SIDES) {
+    if (spinNodes[side]) spinNodes[side].rotation.x = spinAngle;
+  }
 }
 
 function analyse(model) {
@@ -123,7 +183,6 @@ function analyse(model) {
     box.getSize(s);
     statSize.textContent = `${s.x.toFixed(2)} × ${s.y.toFixed(2)} × ${s.z.toFixed(2)}`;
   }
-  allMaterials = [...mats];
   // кузов = материал краски (clearcoat/paint), иначе крупнейший без текстуры
   let best = null, bestScore = -1;
   model.traverse((o) => {
@@ -161,6 +220,9 @@ function loadGLB(url, label) {
       car = gltf.scene;
       scene.add(car);
       analyse(car);
+      spinAngle = 0;
+      findDrivetrain(car);
+      applySpin();
       loaderEl.classList.add('hidden');
     },
     (xhr) => {
@@ -182,13 +244,6 @@ function loadGLB(url, label) {
 loadGLB('model.glb', 'model.glb');
 
 // UI
-document.getElementById('autoRotate').addEventListener('change', (e) => {
-  controls.autoRotate = e.target.checked;
-});
-document.getElementById('wireframe').addEventListener('change', (e) => {
-  const v = e.target.checked;
-  allMaterials.forEach((m) => { m.wireframe = v; });
-});
 document.getElementById('gridToggle').addEventListener('change', (e) => {
   grid.visible = e.target.checked;
   ground.visible = e.target.checked;
@@ -212,7 +267,68 @@ document.getElementById('fileInput').addEventListener('change', (e) => {
   loadGLB(url, f.name);
 });
 
+// --- Колёса и руль (как в GTA SA) ---
+const steerSlider = document.getElementById('steerSlider');
+const steerVal = document.getElementById('steerVal');
+steerSlider.addEventListener('input', () => {
+  steerDeg = parseFloat(steerSlider.value);
+  steerVal.textContent = `${steerDeg.toFixed(1)}°`;
+  applySteer();
+});
+const spinSpeed = document.getElementById('spinSpeed');
+const spinVal = document.getElementById('spinVal');
+spinSpeed.addEventListener('input', () => {
+  wheelSpeed = parseFloat(spinSpeed.value);
+  spinVal.textContent = `${wheelSpeed.toFixed(1)} рад/с`;
+});
+document.getElementById('spinToggle').addEventListener('change', (e) => {
+  spinOn = e.target.checked;
+});
+document.getElementById('steerLink').addEventListener('change', (e) => {
+  steerLinked = e.target.checked;
+  applySteer();
+});
+const wheelManual = document.getElementById('wheelManual');
+const wheelManualVal = document.getElementById('wheelManualVal');
+wheelManual.addEventListener('input', () => {
+  wheelManualDeg = parseFloat(wheelManual.value);
+  wheelManualVal.textContent = `${wheelManualDeg.toFixed(0)}°`;
+  applySteer();
+});
+
+// Пресеты камеры: кузов / колесо RF / салон (руль)
+function flyTo(pos, tgt) {
+  camera.position.set(pos[0], pos[1], pos[2]);
+  controls.target.set(tgt[0], tgt[1], tgt[2]);
+}
+document.getElementById('camBody').addEventListener('click', () => {
+  flyTo([CAM_HOME.x, CAM_HOME.y, CAM_HOME.z],
+        [TARGET_HOME.x, TARGET_HOME.y, TARGET_HOME.z]);
+});
+document.getElementById('camWheel').addEventListener('click', () => {
+  // переднее правое колесо (Three-координаты dummy wheel_rf_dummy)
+  const w = (steerNodes.rf || spinNodes.rf)
+    ? new THREE.Vector3().setFromMatrixPosition(
+        (steerNodes.rf || spinNodes.rf).matrixWorld)
+    : new THREE.Vector3(0.78, -0.41, -1.46);
+  flyTo([w.x + 1.1, w.y + 0.5, w.z - 1.1], [w.x, w.y, w.z]);
+});
+document.getElementById('camSteer').addEventListener('click', () => {
+  // руль: вид с места водителя
+  const s = steeringNode
+    ? new THREE.Vector3().setFromMatrixPosition(steeringNode.matrixWorld)
+    : new THREE.Vector3(-0.34, 0.18, -0.6);
+  flyTo([s.x + 0.55, s.y + 0.35, s.z + 0.75], [s.x, s.y, s.z]);
+});
+
+const clock = new THREE.Clock();
 renderer.setAnimationLoop(() => {
+  const dt = Math.min(clock.getDelta(), 0.05);
+  // Вращение колёс: вперёд (машина смотрит в −Z) — rotation.x уменьшается.
+  if (spinOn && wheelSpeed !== 0 && Object.keys(spinNodes).length) {
+    spinAngle -= wheelSpeed * dt;
+    applySpin();
+  }
   controls.update();
   renderer.render(scene, camera);
 });

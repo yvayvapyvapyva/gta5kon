@@ -49,22 +49,6 @@
 
         <div class="row">
           <label class="switch">
-            <input type="checkbox" id="autoRotate" checked />
-            <span class="slider"></span>
-          </label>
-          <span>Автовращение</span>
-        </div>
-
-        <div class="row">
-          <label class="switch">
-            <input type="checkbox" id="wireframe" />
-            <span class="slider"></span>
-          </label>
-          <span>Каркас (wireframe)</span>
-        </div>
-
-        <div class="row">
-          <label class="switch">
             <input type="checkbox" id="gridToggle" checked />
             <span class="slider"></span>
           </label>
@@ -84,6 +68,51 @@
           <label for="exposure">Экспозиция: <span id="exposureVal">1.0</span></label>
           <input type="range" id="exposure" min="0.2" max="2" step="0.05" value="1" />
         </div>
+
+        <h2>Колёса и руль · как в GTA SA</h2>
+        <div id="wheelsPanel">
+          <div class="block">
+            <label for="steerSlider">Поворот передних колёс: <span id="steerVal">0°</span></label>
+            <input type="range" id="steerSlider" min="-35" max="35" step="0.5" value="0" />
+            <p class="muted">В SA поворачиваются только <code>wheel_rf/lf_dummy</code> (yaw вокруг вертикали, ±35°), задние стоят прямо.</p>
+          </div>
+
+          <div class="row">
+            <label class="switch">
+              <input type="checkbox" id="spinToggle" checked />
+              <span class="slider"></span>
+            </label>
+            <span>Крутить колёса</span>
+          </div>
+          <div class="block">
+            <label for="spinSpeed">Скорость: <span id="spinVal">6.0 рад/с</span></label>
+            <input type="range" id="spinSpeed" min="-15" max="15" step="0.5" value="6" />
+            <p class="muted">«+» — вперёд, «−» — назад. Вращение — вокруг оси ступицы (X), левые колёса отзеркалены игрой.</p>
+          </div>
+
+          <div class="row">
+            <label class="switch">
+              <input type="checkbox" id="steerLink" checked />
+              <span class="slider"></span>
+            </label>
+            <span>Руль связан с поворотом (×2.5)</span>
+          </div>
+          <div class="block">
+            <label for="wheelManual">Руль вручную: <span id="wheelManualVal">0°</span></label>
+            <input type="range" id="wheelManual" min="-150" max="150" step="1" value="0" />
+            <p class="muted">Фрейм «руль» крутится вокруг колонки. Работает, когда связь выключена.</p>
+          </div>
+
+          <div class="block">
+            <label>Камера</label>
+            <div class="cam-row">
+              <button id="camBody" class="btn small">🚗 Кузов</button>
+              <button id="camWheel" class="btn small">🛞 Колесо</button>
+              <button id="camSteer" class="btn small">🧑‍✈️ Салон</button>
+            </div>
+          </div>
+        </div>
+        <p id="wheelsNote" class="muted hidden">Ноды колёс/руля не найдены (старый model.glb без иерархии) — переконвертируйте: <code>python3 tools/convert.py …</code></p>
 
         <h2>Модель</h2>
         <dl class="stats">
