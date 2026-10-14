@@ -719,11 +719,88 @@ def build_glb(dff, images, out_path):
     if steer_wheel_fi in atomics_by_frame:
         g_steer = geoms[atomics_by_frame[steer_wheel_fi]['geom']]
 
-    # --- статика: все атомики кроме колеса и руля ---
+    # --- интерактивные детали: каждая — свой меш + нода с пивотом ---
+    # pivot ('dummy', fi) = мировая позиция дамми — как в игре, деталь
+    # вращается/отрывается вокруг дамми; ('bbox',) = центр геометрии
+    # (для оптики/стёкол, где пивот не важен, а важно вкл/выкл).
+    # hinge_axis — ось петли в координатах GTA для будущих анимаций
+    # (двери — вертикаль, капот/багажник — поперечная).
+    PARTS = [
+        ('door_rf',        [37], ('dummy', 36), (0, 0, 1)),
+        ('door_lf',        [35], ('dummy', 34), (0, 0, 1)),
+        ('door_rr',        [31], ('dummy', 30), (0, 0, 1)),
+        ('door_lr',        [33], ('dummy', 32), (0, 0, 1)),
+        ('bonnet',         [47], ('dummy', 46), (1, 0, 0)),
+        ('boot',           [45], ('dummy', 44), (1, 0, 0)),
+        ('bumper_front',   [53], ('dummy', 38), None),
+        ('bumper_rear',    [40], ('dummy', 39), None),
+        ('windscreen',     [43], ('dummy', 42), None),
+        ('optika_front',   [26], ('bbox',), None),
+        ('bulbs_front',    [27], ('bbox',), None),
+        ('headlight',      [28], ('bbox',), None),
+        ('glass_headlight', [29], ('bbox',), None),
+        ('repeater',       [18], ('bbox',), None),
+        ('repeater_glass', [19], ('bbox',), None),
+        ('grille',         [25], ('bbox',), None),
+        ('front_trim',     [21, 22, 23], ('bbox',), None),
+        ('optika_rear',    [13], ('bbox',), None),
+        ('bulbs_rear',     [14], ('bbox',), None),
+        ('lens_red',       [15], ('bbox',), None),
+        ('lens_clear',     [16], ('bbox',), None),
+        ('lens_rear',      [17], ('bbox',), None),
+        ('reflector_rear', [41], ('bbox',), None),
+        ('glass_rear',     [24], ('bbox',), None),
+    ]
+    # маркеры без геометрии — точки привязки для будущего
+    # (дым выхлопа, посадка персонажей, крышка бака, габариты света)
+    MARKERS = [1, 2, 48, 49, 50, 51, 52]
+
+    frame_to_part = {}
+    for pname, frames, _piv, _h in PARTS:
+        for fi in frames:
+            frame_to_part[fi] = pname
+
+    part_data = {}  # pname -> {groups, order, pivot_gta, frames, hinge}
+    for pname, frames, pivspec, hinge in PARTS:
+        jobs_p = []
+        for fi in frames:
+            at = atomics_by_frame.get(fi)
+            if at is None:
+                print(f"[glb] деталь {pname}: фрейм {fi} без геометрии — пропуск")
+                continue
+            g = geoms[at['geom']]
+            if g['verts'] is None or g['tris'] is None:
+                continue
+            Vw, Nw, UV = world_verts(g, fi)
+            jobs_p.append((g, Vw, Nw, UV, fi))
+        if not jobs_p:
+            print(f"[glb] деталь {pname}: нет геометрии — пропуск")
+            continue
+        allv = np.vstack([j[1] for j in jobs_p])
+        bbmin, bbmax = allv.min(axis=0), allv.max(axis=0)
+        center = (bbmin + bbmax) / 2.0
+        if pivspec[0] == 'dummy':
+            P = W(pivspec[1])
+            # диагностика: дамми должен быть у края детали (петля), а не в центре
+            print(f"[glb] деталь {pname}: пивот-дамми {P.round(3).tolist()}, "
+                  f"bbox-центр {center.round(3).tolist()}")
+        else:
+            P = center
+        groups, order = new_store()
+        for g, Vw, Nw, UV, fi in jobs_p:
+            emit_job(groups, order, g, Vw - P, Nw, UV, f'{pname}:{fi}', False)
+        part_data[pname] = {'groups': groups, 'order': order,
+                            'pivot_gta': [float(v) for v in P],
+                            'frames': frames, 'hinge': hinge,
+                            'tris': sum(len(gr['idx']) // 3 for gr in groups.values())}
+
+    # --- статика: всё остальное (кузов, салон, подкапотка) одним мешем ---
     static_jobs = 0
     for at in atomics:
         fi = at['frame']
         if fi == wheel_mesh_fi or fi == steer_wheel_fi:
+            continue
+        if fi in frame_to_part:
             continue
         g = geoms[at['geom']]
         if g['verts'] is None or g['tris'] is None:
@@ -788,14 +865,21 @@ def build_glb(dff, images, out_path):
           f"{sum(len(gr['idx']) // 3 for gr in wheelR_groups.values())}/"
           f"{sum(len(gr['idx']) // 3 for gr in wheelL_groups.values())}; "
           f"статика: {static_jobs} атомиков")
-    # общий порядок материалов: статика, руль, колёса
+    # общий порядок материалов: статика, детали, руль, колёса
     order = []
-    for _o in (static_order, steer_order, wheelR_order, wheelL_order):
+    stores_in_order = [(static_order, static_groups)]
+    for pname, _f, _p, _h in PARTS:
+        if pname in part_data:
+            stores_in_order.append((part_data[pname]['order'], part_data[pname]['groups']))
+    stores_in_order += [(steer_order, steer_groups),
+                        (wheelR_order, wheelR_groups),
+                        (wheelL_order, wheelL_groups)]
+    for _o, _g in stores_in_order:
         for k in _o:
             if k not in order:
                 order.append(k)
     groups = {}
-    for _g in (static_groups, steer_groups, wheelR_groups, wheelL_groups):
+    for _o, _g in stores_in_order:
         groups.update(_g)
     for k in order:
         gr = groups[k]
@@ -910,13 +994,18 @@ def build_glb(dff, images, out_path):
         return prims
 
     meshes = []
-    mesh_idx = {}  # 'static' | 'steer' | 'wheelR' | 'wheelL' -> idx
-    for tag, keys, store, mname in (
-        ('static', static_order, static_groups, 'chassis'),
+    mesh_idx = {}  # 'static' | part | 'steer' | 'wheelR' | 'wheelL' -> idx
+    mesh_jobs = [('static', static_order, static_groups, 'chassis')]
+    for pname, _f, _p, _h in PARTS:
+        if pname in part_data:
+            d = part_data[pname]
+            mesh_jobs.append((pname, d['order'], d['groups'], pname))
+    mesh_jobs += [
         ('steer', steer_order, steer_groups, 'steering_wheel'),
         ('wheelR', wheelR_order, wheelR_groups, 'wheel_R'),
         ('wheelL', wheelL_order, wheelL_groups, 'wheel_L'),
-    ):
+    ]
+    for tag, keys, store, mname in mesh_jobs:
         if not keys:
             continue
         mesh_idx[tag] = len(meshes)
@@ -941,6 +1030,36 @@ def build_glb(dff, images, out_path):
 
     n_chassis = add_node({'mesh': mesh_idx['static'], 'name': 'chassis'})
     scene_roots.append(n_chassis)
+
+    part_nodes = {}  # pname -> node idx (для будущих анимаций из вьювера)
+    for pname, _f, _p, _h in PARTS:
+        if pname not in part_data or pname not in mesh_idx:
+            continue
+        d = part_data[pname]
+        extra = {'part': pname, 'frames': d['frames'],
+                 'pivot_gta': d['pivot_gta']}
+        if d['hinge'] is not None:
+            extra['hinge_axis'] = list(d['hinge'])
+        n_p = add_node({'mesh': mesh_idx[pname], 'name': pname,
+                        'translation': gta_to_three_p(d['pivot_gta']),
+                        'extras': extra})
+        scene_roots.append(n_p)
+        part_nodes[pname] = n_p
+        print(f"[glb] нода {pname}: tris {d['tris']}, "
+              f"translation {[round(v, 3) for v in gta_to_three_p(d['pivot_gta'])]}"
+              f"{' hinge ' + str(d['hinge']) if d['hinge'] else ''}")
+
+    # маркеры без геометрии (точки привязки)
+    for fi in MARKERS:
+        if fi >= len(dff['frames']):
+            continue
+        mname = (names[fi] if fi < len(names) and names[fi]
+                 else f'marker_{fi}')
+        n_m = add_node({'name': mname,
+                        'translation': gta_to_three_p(W(fi)),
+                        'extras': {'marker': mname, 'frame': fi}})
+        scene_roots.append(n_m)
+        print(f"[glb] маркер {mname}: {[round(v, 3) for v in gta_to_three_p(W(fi))]}")
 
     if 'steer' in mesh_idx:
         n_sw = add_node({'mesh': mesh_idx['steer'], 'name': 'steering',

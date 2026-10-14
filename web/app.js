@@ -81,6 +81,7 @@ const STEER_WHEEL_MAX = 540;
 let steerNodes = {};   // side -> Object3D (yaw)
 let spinNodes = {};    // side -> Object3D (roll)
 let steeringNode = null;
+let partNodes = {};    // part name -> Mesh (двери, капот, оптика, ...)
 // Ось рулевой колонки в координатах сцены (приходит из GLB extras,
 // измерена конвертером по плоскости руля; дефолт = старый чистый Z).
 const steerAxis = new THREE.Vector3(0, 0, -1);
@@ -115,6 +116,8 @@ function clearCar() {
   steerNodes = {};
   spinNodes = {};
   steeringNode = null;
+  partNodes = {};
+  document.getElementById('partsList').innerHTML = '';
   spinAngle = 0;
 }
 
@@ -138,6 +141,22 @@ function findDrivetrain(model) {
   if (Array.isArray(ax) && ax.length === 3) {
     steerAxis.fromArray(ax).normalize();
   }
+  // Детали: объекты с userData.part (имена и пивоты — как дамми в SA).
+  // Важно: GLTFLoader разбивает меш с N материалами на группу из N мешей,
+  // а extras ноды кладёт на группу-обёртку — поэтому ищем по любому типу
+  // объекта, а не только isMesh (иначе найдутся лишь одноматериальные детали).
+  partNodes = {};
+  model.traverse((o) => {
+    if (o.userData && typeof o.userData.part === 'string') {
+      partNodes[o.userData.part] = o;
+    }
+  });
+  buildPartsList();
+  // Диагностика для отладки кэша: сколько part-нод реально нашлось в модели.
+  let meshCount = 0;
+  model.traverse((o) => { if (o.isMesh) meshCount++; });
+  console.log('[viewer] мешей в модели:', meshCount,
+    '| деталей с userData.part:', Object.keys(partNodes).sort());
   const hasWheels = Object.keys(spinNodes).length > 0;
   const hasSteering = !!steeringNode;
   document.getElementById('wheelsPanel').classList.toggle('hidden', !(hasWheels || hasSteering));
@@ -298,6 +317,67 @@ window.addEventListener('keyup', (e) => trackKey(e, false));
 window.addEventListener('blur', () => {
   for (const k in keysDown) keysDown[k] = false;
 });
+
+// Панель «Детали»: видимость каждой part-ноды, группами-аккордеонами,
+// чтобы всё влезало без незаметного скролла.
+const PART_GROUPS = [
+  ['Кузов и навесное', ['door_rf', 'door_lf', 'door_rr', 'door_lr',
+    'bonnet', 'boot', 'bumper_front', 'bumper_rear']],
+  ['Стёкла', ['windscreen', 'glass_rear']],
+  ['Оптика перед', ['optika_front', 'bulbs_front', 'headlight',
+    'glass_headlight', 'repeater', 'repeater_glass', 'grille', 'front_trim']],
+  ['Оптика зад', ['optika_rear', 'bulbs_rear', 'lens_red', 'lens_clear',
+    'lens_rear', 'reflector_rear']],
+];
+const PART_LABELS = {
+  door_rf: 'Дверь передняя правая', door_lf: 'Дверь передняя левая',
+  door_rr: 'Дверь задняя правая', door_lr: 'Дверь задняя левая',
+  bonnet: 'Капот', boot: 'Багажник',
+  bumper_front: 'Бампер передний', bumper_rear: 'Бампер задний',
+  windscreen: 'Лобовое стекло', glass_rear: 'Заднее стекло',
+  optika_front: 'Корпус фары', bulbs_front: 'Лампы передние',
+  headlight: 'Фара', glass_headlight: 'Стекло фары',
+  repeater: 'Поворотник', repeater_glass: 'Стекло поворотника',
+  grille: 'Решётка', front_trim: 'Облицовка передка',
+  optika_rear: 'Корпус фонаря', bulbs_rear: 'Лампы задние',
+  lens_red: 'Рассеиватель красный', lens_clear: 'Рассеиватель прозрачный',
+  lens_rear: 'Стекло фонаря', reflector_rear: 'Катафот задний',
+};
+function buildPartsList() {
+  const box = document.getElementById('partsList');
+  box.innerHTML = '';
+  const found = PART_GROUPS.map(([t, ns]) => [t, ns.filter((n) => partNodes[n])])
+    .filter(([, ns]) => ns.length);
+  const total = found.reduce((s, [, ns]) => s + ns.length, 0);
+  document.getElementById('partsHeader').textContent = `Детали · ${total}`;
+  found.forEach(([title, names], gi) => {
+    const det = document.createElement('details');
+    det.className = 'parts-group';
+    if (gi === 0) det.open = true;
+    const sum = document.createElement('summary');
+    sum.textContent = `${title} · ${names.length}`;
+    det.append(sum);
+    for (const n of names) {
+      const row = document.createElement('div');
+      row.className = 'row';
+      const label = document.createElement('label');
+      label.className = 'switch';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = partNodes[n].visible;
+      cb.addEventListener('change', () => { partNodes[n].visible = cb.checked; });
+      const slider = document.createElement('span');
+      slider.className = 'slider';
+      label.append(cb, slider);
+      const text = document.createElement('span');
+      text.textContent = PART_LABELS[n] || n;
+      text.title = n; // имя ноды как в SA
+      row.append(label, text);
+      det.append(row);
+    }
+    box.append(det);
+  });
+}
 
 // Пресеты камеры: кузов / колесо RF / салон (руль)
 function flyTo(pos, tgt) {
