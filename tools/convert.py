@@ -307,16 +307,19 @@ def classify_material(m):
         out['alphaMode'] = 'BLEND'
         out['opacity'] = max(alpha, 0.15)
     elif has_env and not is_textured:
-        # краска / хром / глянцевый пластик — как в игре: env-отражение + лак
+        # краска / хром — как в игре: env-отражение + лак.
+        # Краска — ДИЭЛЕКТРИК (metallic 0): глянец даёт лак (clearcoat),
+        # иначе любой светлый цвет выглядит хромом-зеркалом.
+        # Хром — настоящий металл (metallic 1).
         bright = (r + g + b) / 3.0 / 255.0
         chrome_like = bright > 0.55 and abs(r - g) < 12 and abs(g - b) < 12
         if chrome_like:
             out.update({'metallic': 1.0, 'roughness': 0.12,
                         'clearcoat': 1.0, 'kind': 'chrome'})
         else:
-            rough = 0.34 - min(refl, 0.5) * 0.35 - spec * 0.1
-            out.update({'metallic': 0.8,
-                        'roughness': round(max(0.15, rough), 3),
+            rough = 0.42 - min(refl, 0.5) * 0.3 - spec * 0.1
+            out.update({'metallic': 0.0,
+                        'roughness': round(max(0.2, rough), 3),
                         'clearcoat': 1.0, 'kind': 'paint'})
     elif is_textured:
         # салон/текстуры: матовые, но specular из игры даёт блик

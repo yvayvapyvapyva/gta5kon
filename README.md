@@ -50,7 +50,8 @@ python3 tools/convert.py --dff path/to/car.dff --txd path/to/car.txd --out path/
   `petrolcap`, `headlights`, `taillights`, …) для будущего.
   Всего ~950k треугольников, 40 материалов, 17 текстур.
   Координаты GTA (Z-up) переведены в Three.js (Y-up). Материалы как в игре:
-  краска/хром (env MatFX → металлик + clearcoat-лак), стёкла (альфа 102–190 →
+  краска — диэлектрик + clearcoat-лак (металлик 0, иначе светлые цвета
+  выглядят хромом), хром — настоящий металл, стёкла (альфа 102–190 →
   BLEND + стекло), фары/фонари (vehiclelights128 → emissive), specular
   vehiclespecdot64 → roughness.
 - `web/index.html` / `app.js` / `styles.css` — viewer на Three.js (CDN):
